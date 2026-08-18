@@ -17,8 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from qyp_multi_registry import RegistryError
-from qyp_multi_transport import TransportError, TransportStore
+from tls_multi_registry import RegistryError
+from tls_multi_transport import TransportError, TransportStore
 
 
 MAX_BODY = 256 * 1024

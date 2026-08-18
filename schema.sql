@@ -1,5 +1,5 @@
--- Canonical schema is embedded in qyp_multi_registry.py so the CLI can
+-- Canonical schema is embedded in tls_multi_registry.py so the CLI can
 -- initialize a fresh database without a migration dependency.
 -- This file is a human-readable marker for deployment reviews.
 -- Current executable schema version: 3 (task groups and delivery leases).
--- See qyp_multi_registry.py:SCHEMA and Registry._migrate_schema().
+-- See tls_multi_registry.py:SCHEMA and Registry._migrate_schema().

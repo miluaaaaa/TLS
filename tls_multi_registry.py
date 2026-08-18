@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-DEFAULT_DB = Path.home() / ".local/state/qyp-tls-multi/multi.sqlite3"
+DEFAULT_DB = Path.home() / ".local/state/tls-multi/multi.sqlite3"
 SCHEMA_VERSION = 4
 SESSION_ID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.IGNORECASE)
 IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
@@ -239,7 +239,7 @@ def now() -> int:
 
 
 def _db_from_env() -> Path:
-    return Path(os.environ.get("QYP_TLS_MULTI_DB", str(DEFAULT_DB)))
+    return Path(os.environ.get("TLS_MULTI_DB", str(DEFAULT_DB)))
 
 
 def _identifier(value: object, field: str) -> str:
@@ -1849,7 +1849,7 @@ def _json_arg(value: str, field: str) -> dict[str, Any]:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="TLS qyp 多人模式控制面")
+    parser = argparse.ArgumentParser(description="TLS multi-user control plane")
     parser.add_argument("--db", type=Path, default=None, help="SQLite 注册表路径")
     parser.add_argument("--json", action="store_true", help="保留兼容参数，输出 JSON")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2087,7 +2087,7 @@ def main(argv: list[str] | None = None) -> int:
         _print(result)
         return 0
     except (RegistryError, sqlite3.Error) as error:
-        print(f"qyp-tls-multi: {error}", file=sys.stderr)
+        print(f"tls-multi: {error}", file=sys.stderr)
         return 2
 
 

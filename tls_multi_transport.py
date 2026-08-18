@@ -19,11 +19,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
-from qyp_multi_registry import Registry, RegistryError
+from tls_multi_registry import Registry, RegistryError
 
 
-DEFAULT_REGISTRY_DB = Path.home() / ".local/state/qyp-tls-multi/multi.sqlite3"
-DEFAULT_TRANSPORT_DB = Path.home() / ".local/state/qyp-tls-multi/agent.sqlite3"
+DEFAULT_REGISTRY_DB = Path.home() / ".local/state/tls-multi/multi.sqlite3"
+DEFAULT_TRANSPORT_DB = Path.home() / ".local/state/tls-multi/agent.sqlite3"
 SESSION_ID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.IGNORECASE)
 SESSION_STATUS = {"unknown", "idle", "running", "offline"}
 COMMAND_STATUS = {"queued", "inflight", "completed", "failed"}
@@ -41,13 +41,13 @@ def now() -> int:
 
 def _registry_path(path: str | Path | None = None) -> Path:
     return Path(path) if path is not None else Path(
-        os.environ.get("QYP_TLS_MULTI_DB", str(DEFAULT_REGISTRY_DB))
+        os.environ.get("TLS_MULTI_DB", str(DEFAULT_REGISTRY_DB))
     )
 
 
 def _transport_path(path: str | Path | None = None) -> Path:
     return Path(path) if path is not None else Path(
-        os.environ.get("QYP_TLS_MULTI_TRANSPORT_DB", str(DEFAULT_TRANSPORT_DB))
+        os.environ.get("TLS_MULTI_TRANSPORT_DB", str(DEFAULT_TRANSPORT_DB))
     )
 
 

@@ -5,8 +5,8 @@ import time
 import unittest
 from pathlib import Path
 
-from qyp_multi_registry import Registry
-from qyp_multi_transport import TransportError, TransportStore
+from tls_multi_registry import Registry
+from tls_multi_transport import TransportError, TransportStore
 
 
 SESSION = "01a00558-3cd2-7690-a2ec-bcb3289f95b2"

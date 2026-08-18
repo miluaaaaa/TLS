@@ -1,11 +1,11 @@
-"""Transport-neutral adapter for wiring the qyp registry into Feishu ingress."""
+"""Transport-neutral adapter for wiring the TLS registry into Feishu ingress."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
-from qyp_multi_registry import AuthorizationDenied, Registry, RegistryError
+from tls_multi_registry import AuthorizationDenied, Registry, RegistryError
 
 
 @dataclass(frozen=True)

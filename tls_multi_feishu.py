@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Feishu-facing bridge for the qyp TLS multi-user registry.
+"""Feishu-facing bridge for the TLS multi-user registry.
 
 This module deliberately has no Lark SDK dependency.  The running TLS
 ingress can use it to authorize a group event, while the registry remains
@@ -12,17 +12,17 @@ import os
 from pathlib import Path
 from typing import Any
 
-from qyp_multi_adapter import Route, claim_event, route_event
-from qyp_multi_registry import AuthorizationDenied, Registry, RegistryError
+from tls_multi_adapter import Route, claim_event, route_event
+from tls_multi_registry import AuthorizationDenied, Registry, RegistryError
 
 
-DEFAULT_DB = Path.home() / ".local/state/qyp-tls-multi/multi.sqlite3"
+DEFAULT_DB = Path.home() / ".local/state/tls-multi/multi.sqlite3"
 
 
 def registry(path: str | Path | None = None) -> Registry:
-    """Create a registry using the service override or the qyp default DB."""
+    """Create a registry using the service override or the TLS default DB."""
 
-    selected = Path(path) if path is not None else Path(os.environ.get("QYP_TLS_MULTI_DB", DEFAULT_DB))
+    selected = Path(path) if path is not None else Path(os.environ.get("TLS_MULTI_DB", DEFAULT_DB))
     return Registry(selected)
 
 

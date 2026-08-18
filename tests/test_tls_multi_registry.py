@@ -5,8 +5,8 @@ import unittest
 import sqlite3
 from pathlib import Path
 
-from qyp_multi_adapter import claim_event, group_dashboard
-from qyp_multi_feishu import (
+from tls_multi_adapter import claim_event, group_dashboard
+from tls_multi_feishu import (
     authorize_group_event,
     claim_group_event,
     complete_group_event,
@@ -17,7 +17,7 @@ from qyp_multi_feishu import (
     shared_session,
     task_dashboard,
 )
-from qyp_multi_registry import AuthorizationDenied, Registry, RegistryError
+from tls_multi_registry import AuthorizationDenied, Registry, RegistryError
 
 
 SESSION_A = "019ffaf4-eccd-7203-b5b4-51d967ec128b"
@@ -270,7 +270,7 @@ class MultiUserRegistryTests(unittest.TestCase):
             {
                 "objective": "验证任务事件链",
                 "acceptance": ["事件可回放", "重复事件不重复写入"],
-                "constraints": {"paths": ["qyp_tls_multi_person_20260815"]},
+                "constraints": {"paths": ["tls_multi_person_fixture"]},
             },
             task_id="task-control-plane",
         )
