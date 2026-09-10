@@ -23,6 +23,7 @@ class PairHelperTests(unittest.TestCase):
                 name="test-agent",
                 hostname="test-host",
                 config=str(config),
+                systemd_dir=str(Path(root) / "systemd"),
             )
             responses = [
                 {
@@ -46,6 +47,9 @@ class PairHelperTests(unittest.TestCase):
             saved = config.read_text(encoding="utf-8")
             self.assertIn("TLS_AGENT_USER_ID=user-test\n", saved)
             self.assertIn("TLS_AGENT_TOKEN=tlsa-test-secret\n", saved)
+            self.assertIn("TLS_FAULT_HEALER_ENABLED=1\n", saved)
+            self.assertTrue((config.parent / "runtime" / "tls_fault_healer.py").is_file())
+            self.assertTrue((Path(root) / "systemd" / "tls-fault-healer.service").is_file())
 
     def test_public_http_is_rejected(self) -> None:
         with self.assertRaises(tls_pair.PairingError):

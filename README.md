@@ -13,7 +13,24 @@ Give this repository URL to an existing Codex Agent.
    ```
 
 The helper exchanges the code for a local Agent credential and stores it in
-`~/.config/tls/agent.env`. The credential must stay on the user's computer.
+`~/.config/tls/agent.env`. It also installs and enables the local TLS Fault
+Healer protocol. The credential must stay on the user's computer.
+
+## Fault Healer Protocol
+
+Each successful pairing accepts the TLS Fault Healer protocol for that machine.
+The helper installs `~/.config/tls/runtime/tls_fault_healer.py`, writes its
+enabled state into `agent.env`, and enables a user-level retry timer when
+systemd is available. The component creates one bounded local Codex diagnosis
+only after the local TLS bridge reports a hard delivery failure. It may repair
+the local bridge, heartbeat, or managed proxy; it never changes the gateway or
+Feishu, rebinds a Codex session, or replays a user message.
+
+A TLS bridge integrates it by invoking the configured
+`TLS_FAULT_HEALER_SCRIPT trigger --reason ... --session-id ... --command-id ...`
+when it reports a hard command/heartbeat failure. Pairing installs this
+protocol but does not retrofit an unrelated pre-existing bridge: that bridge
+must make this explicit trigger call to report its failures.
 
 ## Finding the TLS Bot
 

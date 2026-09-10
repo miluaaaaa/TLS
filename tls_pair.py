@@ -12,6 +12,8 @@ import argparse
 import json
 import os
 import socket
+import shutil
+import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -23,6 +25,7 @@ from urllib.parse import urlsplit
 
 DEFAULT_URL = "https://api.xhqcode.com/tls-agent"
 DEFAULT_CONFIG = Path.home() / ".config/tls/agent.env"
+FAULT_HEALER_SOURCE = Path(__file__).with_name("tls_fault_healer.py")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
@@ -74,6 +77,51 @@ def _write_config(path: Path, values: dict[str, str]) -> None:
         except OSError:
             pass
         raise
+
+
+def _install_fault_healer(config_path: Path, systemd_dir: Path) -> tuple[Path, str]:
+    """Install the portable repair runtime and best-effort user service units."""
+
+    if not FAULT_HEALER_SOURCE.is_file():
+        raise PairingError("配对包缺少 TLS Fault Healer")
+    runtime_dir = config_path.parent / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(runtime_dir, 0o700)
+    script = runtime_dir / "tls_fault_healer.py"
+    shutil.copyfile(FAULT_HEALER_SOURCE, script)
+    os.chmod(script, 0o700)
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(systemd_dir, 0o700)
+    service = systemd_dir / "tls-fault-healer.service"
+    timer = systemd_dir / "tls-fault-healer-retry.timer"
+    service.write_text(
+        "[Unit]\nDescription=TLS Fault Healer - launch bounded local repair\n\n"
+        "[Service]\nType=oneshot\n"
+        f"ExecStart={sys.executable} {script} run\nTimeoutStartSec=30\n"
+        "NoNewPrivileges=true\nPrivateTmp=true\n",
+        encoding="utf-8",
+    )
+    timer.write_text(
+        "[Unit]\nDescription=TLS Fault Healer - retry pending repair\n\n"
+        "[Timer]\nOnBootSec=30\nOnUnitInactiveSec=15\nUnit=tls-fault-healer.service\n\n"
+        "[Install]\nWantedBy=timers.target\n",
+        encoding="utf-8",
+    )
+    status = "installed-unmanaged"
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "daemon-reload"], check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        )
+        if completed.returncode == 0:
+            completed = subprocess.run(
+                ["systemctl", "--user", "enable", "--now", "tls-fault-healer-retry.timer"],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
+            )
+            status = "enabled" if completed.returncode == 0 else "installed-unmanaged"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return script, status
 
 
 def _request(url: str, *, token: str = "", payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -153,6 +201,15 @@ def pair(args: argparse.Namespace) -> int:
     info = _request(f"{base}/v1/agent/info", token=token)
     if str(info.get("user_id", user_id)) != user_id:
         raise PairingError("配对后的身份校验不一致")
+    script, fault_healer = _install_fault_healer(
+        config_path, Path(args.systemd_dir).expanduser()
+    )
+    existing = _load_config(config_path)
+    existing.update({
+        "TLS_FAULT_HEALER_ENABLED": "1",
+        "TLS_FAULT_HEALER_SCRIPT": str(script),
+    })
+    _write_config(config_path, existing)
     print(
         json.dumps(
             {
@@ -160,6 +217,7 @@ def pair(args: argparse.Namespace) -> int:
                 "user_id": user_id,
                 "installation_id": installation_id,
                 "config": str(config_path),
+                "fault_healer": fault_healer,
             },
             ensure_ascii=False,
         )
@@ -194,6 +252,7 @@ def status(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+    parser.add_argument("--systemd-dir", default=str(Path.home() / ".config/systemd/user"))
     sub = parser.add_subparsers(dest="command", required=True)
     pair_parser = sub.add_parser("pair")
     pair_parser.add_argument("--url", default=os.environ.get("TLS_AGENT_URL", DEFAULT_URL))
