@@ -462,6 +462,46 @@ class TransportStore:
                 "SELECT * FROM agent_commands WHERE command_id = ?", (command_id,)
             ).fetchone())
 
+    def retry_failed(
+        self,
+        token: str,
+        command_id: str,
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """Requeue one known pre-turn delivery failure for its owning Agent.
+
+        A retry is intentionally narrower than ``release``: it may only revive
+        the first failed attempt and only for failures that prove the command
+        was not bound to a Codex turn.  This prevents a fault-repair process
+        from replaying arbitrary or possibly completed user requests.
+        """
+
+        credential = self._credential(token)
+        command_id = _text(command_id, "command_id", 100)
+        allowed_errors = {"runtime-unavailable", "turn-id-unavailable", "turn-id-unavailable-cursor-runtime"}
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_commands WHERE command_id = ? AND installation_id = ?",
+                (command_id, credential["installation_id"]),
+            ).fetchone()
+            if row is None:
+                raise TransportError("找不到 command")
+            if (
+                row["status"] != "failed"
+                or int(row["attempts"] or 0) != 1
+                or str(row["last_error"] or "") not in allowed_errors
+            ):
+                raise TransportError("command 不符合自动重试条件")
+            connection.execute(
+                "UPDATE agent_commands SET status = 'queued', lease_until = 0, updated_at = ?, last_error = ? "
+                "WHERE command_id = ?",
+                (now(), _text(reason, "reason", 500, required=False), command_id),
+            )
+            return dict(connection.execute(
+                "SELECT * FROM agent_commands WHERE command_id = ?", (command_id,)
+            ).fetchone())
+
     def renew(
         self,
         token: str,

@@ -18,6 +18,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,11 @@ STATE_ROOT = Path.home() / ".local/state/tls-fault-healer"
 STATE_FILE = STATE_ROOT / "state.json"
 LOCK_FILE = STATE_ROOT / "repair.lock"
 COOLDOWN_SECONDS = 60
+RETRYABLE_PRETURN_FAILURES = {
+    "runtime-unavailable",
+    "turn-id-unavailable",
+    "turn-id-unavailable-cursor-runtime",
+}
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -52,6 +59,49 @@ def _session_alive(name: str) -> bool:
     ).returncode == 0
 
 
+def _agent_config() -> dict[str, str]:
+    path = Path.home() / ".config/tls/agent.env"
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def _retry_failed_command(event: dict[str, Any]) -> str:
+    """Ask the gateway to safely replay exactly one proven pre-turn failure."""
+
+    if str(event.get("reason", "")) not in RETRYABLE_PRETURN_FAILURES:
+        return "not-preturn-failure"
+    command_id = str(event.get("command_id", "")).strip()
+    config = _agent_config()
+    base_url = config.get("TLS_AGENT_URL", "").rstrip("/")
+    token = config.get("TLS_AGENT_TOKEN", "")
+    if not command_id or not base_url or not token:
+        return "retry-config-unavailable"
+    request = urllib.request.Request(
+        base_url + "/v1/agent/retry-failed",
+        data=json.dumps(
+            {"command_id": command_id, "reason": "tls-fault-healer-auto-retry-preturn"},
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read(64 * 1024).decode("utf-8"))
+    except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError):
+        return "retry-request-failed"
+    return "auto-requeued" if isinstance(payload, dict) and payload.get("ok") else "retry-rejected"
+
+
 def _prompt(event: dict[str, Any]) -> str:
     return f"""You are an isolated TLS Fault Healer. A local TLS delivery failure was reported: {json.dumps(event, ensure_ascii=False)}.
 
@@ -67,6 +117,19 @@ def _run_repair() -> int:
         return 0
     active = str(state.get("active_session", ""))
     now = int(time.time())
+    retry_decision = _retry_failed_command(event)
+    if retry_decision == "auto-requeued":
+        state.update(
+            {
+                "last_decision": retry_decision,
+                "last_checked_at": now,
+                "last_event": event,
+                "last_auto_retry_at": now,
+            }
+        )
+        state.pop("pending_event", None)
+        _atomic_json(STATE_FILE, state)
+        return 0
     if _session_alive(active):
         state.update({"last_decision": "active-repair-session", "last_checked_at": now})
         _atomic_json(STATE_FILE, state)

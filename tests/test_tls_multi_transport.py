@@ -109,6 +109,21 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(completion_event["event_type"], "command.completed")
         self.assertEqual(completion_event["payload"]["result"]["answer"], "完成")
 
+    def test_fault_healer_can_retry_only_one_known_preturn_failure(self) -> None:
+        paired = self.store.pair(self.code, name="Owner PC")
+        queued = self.store.enqueue(
+            message_id="om_auto_retry", open_id="ou_owner", chat_id="oc_test", session_id=SESSION, text="自动重投"
+        )
+        first = self.store.poll(paired["token"])[0]
+        self.store.complete(
+            paired["token"], first["command_id"], attempts=1, status="failed", error="turn-id-unavailable-cursor-runtime"
+        )
+        retried = self.store.retry_failed(paired["token"], queued["command_id"], reason="fault-healer")
+        self.assertEqual(retried["status"], "queued")
+        self.assertEqual(self.store.poll(paired["token"])[0]["attempts"], 2)
+        with self.assertRaises(TransportError):
+            self.store.retry_failed(paired["token"], queued["command_id"], reason="again")
+
     def test_command_lease_can_be_renewed_and_attempt_is_checked(self) -> None:
         paired = self.store.pair(self.code, name="Owner PC")
         queued = self.store.enqueue(

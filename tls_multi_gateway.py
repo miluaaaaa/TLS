@@ -157,6 +157,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if path == "/v1/agent/retry-failed":
+                self._write(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        **self.store.retry_failed(
+                            token,
+                            str(payload.get("command_id", "")),
+                            reason=str(payload.get("reason", "")),
+                        ),
+                    },
+                )
+                return
             if path == "/v1/agent/renew":
                 self._write(
                     HTTPStatus.OK,
