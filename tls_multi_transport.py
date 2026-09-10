@@ -558,9 +558,13 @@ class TransportStore:
             }
             event_type = "command.completed" if status == "completed" else "command.failed"
             connection.execute(
-                "INSERT OR IGNORE INTO agent_events(command_id, installation_id, session_id, event_type, payload_json, "
+                "INSERT INTO agent_events(command_id, installation_id, session_id, event_type, payload_json, "
                 "status, lease_until, attempts, next_attempt_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, ?) "
+                "ON CONFLICT(command_id) DO UPDATE SET "
+                "event_type = excluded.event_type, payload_json = excluded.payload_json, "
+                "status = 'pending', lease_until = 0, attempts = 0, "
+                "next_attempt_at = excluded.next_attempt_at, updated_at = excluded.updated_at, last_error = ''",
                 (
                     command_id,
                     str(credential["installation_id"]),
