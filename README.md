@@ -2,10 +2,9 @@
 
 TLS connects Feishu conversations to explicitly authorized Codex sessions.
 The repository contains a legacy single-user pairing protocol and a newer
-[group-chat control plane](group_chat/README.md). The group control plane is a
-library and gateway; a Feishu event consumer and a local Codex delivery bridge
-must be connected by the deployer. See the [integration contract](group_chat/INTEGRATION.md)
-before enabling a bot.
+[group-chat implementation](group_chat/README.md). The group-chat source now
+includes the Feishu long-connection consumer, durable reply bindings, and
+local Codex bridge. Follow the [deployment guide](group_chat/DEPLOY.md).
 
 ## Group chat
 
@@ -15,7 +14,7 @@ falls back to a private session. A writable, explicitly shared session is
 required before a command can be queued. The gateway stores commands and
 results durably; an installation-side Agent polls it over HTTPS.
 
-Start with the [group-chat setup and limitations](group_chat/README.md). The
+Start with the [group-chat setup](group_chat/README.md). The
 [development history](group_chat/GROUP_CHAT_HISTORY.md) separates verified
 routing and regression tests from the group reply/continuation workflow that
 still needs a fresh end-to-end acceptance run.
@@ -38,7 +37,7 @@ hard failure; installation alone does not retrofit another bridge.
 ## Feishu app
 
 The operator must create and publish a Feishu app, grant the required message
-and card permissions, and make the bot visible to the intended users or groups.
+permissions, and make the bot visible to the intended users or groups.
 Adding a bot to a group does not grant access to any Codex session. Register
 the group and explicitly share sessions through the registry first.
 
@@ -54,6 +53,6 @@ dependency-free tests with:
 PYTHONPATH=group_chat python3 -m unittest discover -s group_chat/tests -q
 ```
 
-Agent integration tests in `group_chat/integration_tests` additionally require
-the local Codex bridge modules described in the integration contract. The
-root-level legacy modules retain their original test suite under `tests/`.
+Agent integration tests in `group_chat/integration_tests` run from the same
+source checkout. The root-level legacy modules retain their tests under
+`tests/`. This repository is licensed under [MIT](LICENSE).

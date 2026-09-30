@@ -1,0 +1,8 @@
+# Copy to a mode-600 file outside the repository and replace all placeholders.
+PYTHONPATH=/opt/tls/group_chat
+QYP_TLS_MULTI_DB=/var/lib/tls-group/multi.sqlite3
+QYP_TLS_MULTI_TRANSPORT_DB=/var/lib/tls-group/agent.sqlite3
+TLS_FEISHU_ROUTES_DB=/var/lib/tls-group/routes.sqlite3
+FEISHU_APP_ID=cli_replace_me
+FEISHU_APP_SECRET=replace_me
+FEISHU_BOT_OPEN_ID=ou_replace_me

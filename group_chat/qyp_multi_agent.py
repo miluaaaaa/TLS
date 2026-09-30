@@ -30,7 +30,7 @@ from gateway_url import gateway_base_url
 
 
 ROOT = Path(__file__).resolve().parent
-TLS_LIB = Path(os.environ.get("TLS_AGENT_LOCAL_LIB", str(Path.home() / ".local/lib/tls")))
+TLS_LIB = Path(os.environ.get("TLS_AGENT_LOCAL_LIB", str(ROOT)))
 if str(TLS_LIB) not in os.sys.path:
     os.sys.path.insert(0, str(TLS_LIB))
 
@@ -61,7 +61,7 @@ DEFAULT_COMMAND_LEASE_SECONDS = 30
 DEFAULT_LEASE_RENEW_INTERVAL = 5.0
 DEFAULT_RECOVERY_COOLDOWN_SECONDS = 60.0
 PROTOCOL_VERSION = "2"
-RELEASE_ID = os.environ.get("TLS_RELEASE_ID", "tls-self-heal-v2.1-20260911")
+RELEASE_ID = os.environ.get("TLS_RELEASE_ID", "tls-group-chat-v1")
 DEFAULT_RECOVERY_LAUNCH_TIMEOUT = 30.0
 MAX_REPLY_CHARS = 12000
 COMPLETE_RETRY_DELAYS = (0.5, 1.0, 2.0)
@@ -369,13 +369,7 @@ def launch_recovery_tickets(config: dict[str, str], heartbeat: dict[str, Any]) -
         workspace = _workspace(transcript) if transcript is not None else ""
         cwd = workspace if workspace and Path(workspace).is_dir() else str(Path.home())
         environment = os.environ.copy()
-        environment["PATH"] = ":".join(
-            [
-                str(Path.home() / ".local/bin"),
-                str(Path.home() / "node-v20.11.1-linux-x64/bin"),
-                environment.get("PATH", ""),
-            ]
-        )
+        environment["PATH"] = ":".join([str(Path.home() / ".local/bin"), environment.get("PATH", "")])
         try:
             api_request(config, "/v1/agent/recovery/report", payload={
                 "ticket_id": ticket_id, "event": "launching", "lease_owner": lease_owner,

@@ -1,66 +1,29 @@
 # Integration contract
 
-The group modules do not open a Feishu WebSocket or read Codex transcripts on
-the gateway. The deployment supplies two adapters: a verified Feishu event
-consumer on the control-plane host and a local Codex bridge beside each Agent.
+`feishu_group_ingress.py` receives Feishu events through the official SDK
+WebSocket client. Only text in registered groups is considered. A command
+must mention this bot or reply to a TLS result. `/session <UUID> <command>`
+selects a writable shared session explicitly; without it, the group must
+have exactly one shared session. An unauthorized message cannot fall back
+to a private session.
 
-## Feishu ingress
+The ingress persists the incoming message before acknowledging the WebSocket
+callback. It rechecks group membership and write access, then uses
+`TransportStore.enqueue()` for the atomic message-ID claim. The Agent polls,
+binds a real Codex turn, renews the command lease, and reports completion.
+The ingress claims the durable completion event, sends one Feishu reply using
+a stable deduplication UUID, stores that reply's message ID and session route,
+then marks the event sent. On send failure it retries later. A reply to the
+stored TLS message resolves the same session and repeats authorization before
+enqueueing the next command.
 
-The event consumer must authenticate the Feishu event before using its IDs.
-For a group command, construct an event with `open_id`, `chat_id`,
-`chat_type="group"`, and a stable `message_id` from Feishu. Resolve the target
-from an explicit command slot or a reply-card binding; never guess a private
-session. The following is the call order after parsing and target resolution:
+The local Agent loads the bridge modules included in this directory. It
+requires a local Codex transcript and a supported app-server socket or tmux
+target. `TLS_AGENT_LOCAL_LIB` may override their location, but is not needed
+for a source checkout. `TLS_FAILURE_REPAIR_SCRIPT` is optional; do not enable
+automatic recovery until that separate handler has been validated locally.
 
-```python
-from qyp_multi_feishu import ensure_group_member, authorize_group_event, registered_group
-from qyp_multi_transport import TransportStore
-
-if registered_group(event["chat_id"]) is not None:
-    ensure_group_member(event["chat_id"], event["open_id"])
-    route = authorize_group_event(event, session_id, action="write")
-    queued = TransportStore().enqueue(
-        message_id=event["message_id"], open_id=route.open_id,
-        chat_id=route.chat_id, session_id=route.session_id, text=command_text,
-    )
-```
-
-`enqueue()` owns the atomic message claim. Calling `claim_group_event()` first
-would make the subsequent enqueue appear duplicate. Check `duplicate`,
-`queued`, and `waiting_recovery` in its result; acknowledge only the observed
-state. Keep the Feishu message ID on the command and reply so retries can be
-deduplicated. Recheck membership and share permissions for a reply or card
-action before queuing another command.
-
-To publish Agent results, use `TransportStore.next_event()`,
-`claim_event(event_id)`, and `complete_event(event_id, status="sent")` after a
-successful Feishu send. On a failed send, complete with `status="failed"` and
-a bounded retry delay. A claimed event must not be reported sent before Feishu
-accepts the reply. Store the returned Feishu message ID for any reply-based
-continuation. This package does not include that message-binding store or a
-running Feishu consumer; an operator must implement and test them.
-
-## Local Agent bridge
-
-`qyp_multi_agent.py` imports four local bridge modules: `codex_session_watch`,
-`codex_completion_watch`, `mobile_reply`, and `session_policy`. Set
-`TLS_AGENT_LOCAL_LIB` to the directory containing them. The bridge must report
-the exact submitted turn, preserve a bound turn across Agent restarts, and
-prove absence of delivery before retrying a pre-turn failure. These modules
-are installation-specific and are not bundled here.
-
-Set `TLS_FAILURE_REPAIR_SCRIPT` only if an installed, trusted local repair
-handler implements the `trigger` command. The repository's legacy
-`tls_fault_healer.py` is the default path when this variable is unset. Do not
-enable automatic recovery solely because the gateway process is healthy.
-
-## Acceptance before a production claim
-
-In a registered test group, send one unique command and verify its single
-claim, Agent delivery, exact Codex turn, and one reply attached to the
-original group message. Then reply to that TLS message and verify the next
-command reaches the same session exactly once. During a turn longer than the
-lease interval, verify fresh heartbeats and lease renewal. Finally, exercise
-a Feishu send failure and Agent restart while checking that non-target
-sessions remain routable. Record IDs and timestamps in a private test log;
-publish only a redacted summary.
+The included tests cover authorization, duplicate events, completion sending,
+send retry, reply continuation, bound turns, and Agent restart behavior. Before
+claiming a deployment is accepted, perform the real-group probe in
+[DEPLOY.md](DEPLOY.md) and record private IDs/timestamps outside the repository.

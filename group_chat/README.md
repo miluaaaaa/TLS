@@ -1,9 +1,8 @@
 # Group-chat control plane
 
-This directory contains the TLS multi-user registry, Feishu-neutral adapter,
-durable Agent transport, loopback HTTP gateway, and optional user-side Agent.
-It is a source release, not a copy of an operator's running state or Feishu
-event consumer.
+This directory contains the TLS multi-user registry, Feishu WebSocket ingress,
+durable Agent transport, loopback HTTP gateway, and user-side Codex Agent.
+No operator credentials or running state are included.
 
 ## Components
 
@@ -13,16 +12,21 @@ event consumer.
 | `qyp_multi_adapter.py`, `qyp_multi_feishu.py` | Authorization and group-event bridge without a Feishu SDK dependency. |
 | `qyp_multi_transport.py` | Pairing, heartbeats, command leases, completion events, and recovery records in SQLite. |
 | `qyp_multi_gateway.py` | Agent HTTP API bound to loopback; put an HTTPS reverse proxy in front for remote Agents. |
-| `qyp_multi_agent.py` | Optional user-side Agent. It requires the local Codex bridge modules listed in `INTEGRATION.md`. |
+| `feishu_group_ingress.py` | Feishu long-connection event consumer, reply sender, and durable reply-to-continue bindings. |
+| `qyp_multi_agent.py` | User-side Agent; its Codex bridge modules are included here. |
 
 The executable registry schema is embedded in `qyp_multi_registry.py`
 (`SCHEMA_VERSION = 7`). `schema.sql` is only a human-readable marker. The
 transport schema is version 2 and the Agent wire protocol is version 2.
 
-## Local control-plane setup
+## Setup
 
-Use Python 3.10 or later. Keep the two SQLite databases in a private directory
-on the gateway host. These are example identifiers, not real Feishu IDs:
+Use Python 3.10 or later on Linux. The Agent additionally needs Codex CLI and
+an active Codex app-server runtime or a supported tmux session. The server
+needs the pinned Feishu SDK dependencies in `requirements.txt`. See the complete
+[deployment guide](DEPLOY.md) for Feishu app permissions, TLS proxy, pairing,
+services, and acceptance. Keep all three SQLite databases in a private
+directory on the gateway host. These are example identifiers:
 
 ```bash
 export PYTHONPATH="$PWD/group_chat"
@@ -45,14 +49,13 @@ python3 group_chat/qyp_multi_gateway.py --host 127.0.0.1 --port 8766
 ```
 
 Both gateway and event consumer must use the same registry and transport
-files. The gateway deliberately refuses a non-loopback bind. Expose it only
-behind a TLS reverse proxy with access controls, then give the Agent the
-HTTPS URL.
+files. The gateway deliberately refuses a non-loopback bind. Expose it behind
+a TLS reverse proxy, then give the Agent its HTTPS URL.
 
 ## Authorization and message lifecycle
 
-The Feishu ingress must supply a real `open_id`, `chat_id`, `message_id`, and
-`chat_type=group` from a verified event. The group must already be registered.
+The Feishu ingress obtains `open_id`, `chat_id`, `message_id`, and `chat_type`
+from the SDK long connection. The group must already be registered.
 The bridge can enroll a sender from that group event, but a session becomes
 accessible only after explicit sharing. `read` shares cannot issue commands.
 Revoking a share removes group access and associated subscriptions.
@@ -66,9 +69,8 @@ Feishu accepts the reply. The [integration contract](INTEGRATION.md) gives the
 required call sequence and failure handling.
 
 Queue receipt means only that a command was accepted, not that Codex saw it.
-The complete reply-to-original-message and reply-to-continue loop has not yet
-been revalidated end to end in this public package. Do not advertise it as an
-accepted feature on service health or unit tests alone.
+The full path is covered by local fake-Feishu integration tests. A real tenant
+end-to-end acceptance is still required for a production deployment.
 
 ## Validation
 
@@ -76,8 +78,6 @@ accepted feature on service health or unit tests alone.
 PYTHONPATH=group_chat python3 -m unittest discover -s group_chat/tests -q
 ```
 
-The Agent integration tests require `codex_session_watch`,
-`codex_completion_watch`, `mobile_reply`, and `session_policy` from the local
-Codex bridge. They are intentionally separate from the dependency-free CI
-suite. See [development history](GROUP_CHAT_HISTORY.md) for the original
-routing and incident evidence.
+The Agent integration suite runs in CI from published source. See
+[development history](GROUP_CHAT_HISTORY.md) for the original routing and
+incident evidence.

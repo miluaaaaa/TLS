@@ -15,9 +15,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install Feishu SDK
+        run: python -m pip install -r group_chat/requirements.txt
       - name: Compile group chat modules
         run: python -m compileall -q group_chat
       - name: Run dependency-free core tests
         run: PYTHONPATH=group_chat:. python -m unittest discover -s group_chat/tests -q
+      - name: Run Agent integration tests
+        run: PYTHONPATH=group_chat:. python -m unittest discover -s group_chat/integration_tests -q
       - name: Run legacy tests
         run: python -m unittest discover -s tests -q

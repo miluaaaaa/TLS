@@ -1,7 +1,7 @@
 # Security and privacy
 
 TLS stores Feishu IDs, session IDs, command payloads, results, and delivery
-metadata in SQLite. Keep both group-chat databases in a service-owned private
+metadata in SQLite. Keep all three group-chat databases in a service-owned private
 directory. The group modules set directories to `0700` and database files to
 `0600`; verify the permissions after migrating an older installation.
 
