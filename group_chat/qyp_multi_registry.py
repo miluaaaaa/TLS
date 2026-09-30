@@ -26,7 +26,7 @@ from typing import Any, Iterable
 
 
 DEFAULT_DB = Path.home() / ".local/state/tls-group-chat/multi.sqlite3"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 SESSION_ID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.IGNORECASE)
 IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 GROUP_SLOT = re.compile(r"^[a-z]{1,2}$", re.IGNORECASE)
@@ -311,6 +311,39 @@ CREATE TABLE IF NOT EXISTS task_assignments (
     accepted_at INTEGER,
     completed_at INTEGER,
     UNIQUE (task_id, user_id, role_id, session_id)
+);
+
+CREATE TABLE IF NOT EXISTS task_queue_claims (
+    claim_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    group_id TEXT NOT NULL REFERENCES groups_(group_id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('active', 'submitted', 'released', 'credited')),
+    evidence_id TEXT REFERENCES evidence(evidence_id) ON DELETE SET NULL,
+    claimed_at INTEGER NOT NULL,
+    submitted_at INTEGER,
+    closed_at INTEGER
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_one_open_claim
+    ON task_queue_claims(task_id) WHERE status IN ('active', 'submitted');
+
+CREATE TABLE IF NOT EXISTS task_credits (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE,
+    claim_id TEXT NOT NULL UNIQUE REFERENCES task_queue_claims(claim_id),
+    user_id TEXT NOT NULL REFERENCES users(user_id),
+    evidence_id TEXT NOT NULL REFERENCES evidence(evidence_id),
+    approved_by TEXT NOT NULL REFERENCES users(user_id),
+    awarded_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_history_shares (
+    group_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    enabled_by TEXT NOT NULL REFERENCES users(user_id),
+    enabled_at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, session_id),
+    FOREIGN KEY (group_id, session_id) REFERENCES session_shares(group_id, session_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS agent_runs (
@@ -2008,12 +2041,32 @@ class Registry:
             owner = self._user_row(connection, owner_reference)
             if str(task["owner_user_id"]) != str(owner["user_id"]):
                 raise AuthorizationDenied("只有任务负责人可以确认验收")
+            previous_credit = connection.execute(
+                "SELECT * FROM task_credits WHERE task_id=?", (tid,),
+            ).fetchone()
+            if task["status"] == "completed" and previous_credit is not None:
+                return {**self._task_dict(task), "credit": dict(previous_credit)}
+            claim = connection.execute(
+                "SELECT * FROM task_queue_claims WHERE task_id=? AND status IN ('active','submitted')",
+                (tid,),
+            ).fetchone()
+            if self._task_dict(task)["contract"].get("team_queue") and claim is None:
+                raise RegistryError("队列任务必须由领取者提交后才能验收")
+            if claim is not None and claim["status"] != "submitted":
+                raise RegistryError("领取者尚未提交任务")
             if sid:
                 attached = connection.execute(
                     "SELECT 1 FROM task_sessions WHERE task_id = ? AND session_id = ?", (tid, sid)
                 ).fetchone()
                 if attached is None:
                     raise RegistryError("验收的 session 未关联到该 task")
+            if claim is not None:
+                evidence = connection.execute(
+                    "SELECT evidence_id FROM evidence WHERE evidence_id=? AND task_id=? "
+                    "AND verification_status='verified' AND (? IS NULL OR session_id=? OR session_id IS NULL)",
+                    (claim["evidence_id"], tid, sid, sid),
+                ).fetchone()
+            elif sid:
                 evidence = connection.execute(
                     "SELECT evidence_id FROM evidence WHERE task_id = ? AND verification_status = 'verified' "
                     "AND (session_id = ? OR session_id IS NULL) ORDER BY created_at DESC LIMIT 1",
@@ -2041,9 +2094,22 @@ class Registry:
                 "UPDATE tasks SET status = 'completed', updated_at = ? WHERE task_id = ?",
                 (timestamp, tid),
             )
+            if claim is not None:
+                connection.execute(
+                    "INSERT INTO task_credits(task_id,claim_id,user_id,evidence_id,approved_by,awarded_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (tid, claim["claim_id"], claim["user_id"], evidence["evidence_id"], owner["user_id"], timestamp),
+                )
+                connection.execute(
+                    "UPDATE task_queue_claims SET status='credited', closed_at=? WHERE claim_id=?",
+                    (timestamp, claim["claim_id"]),
+                )
             connection.commit()
             result = self._task_dict(self._task_row(connection, tid))
             result["approval_event"] = self._task_event_dict(event)
+            credit = connection.execute("SELECT * FROM task_credits WHERE task_id=?", (tid,)).fetchone()
+            if credit is not None:
+                result["credit"] = dict(credit)
             return result
 
     def list_evidence(self, task_id: str, *, verification_status: str | None = None) -> list[dict[str, Any]]:
@@ -2291,6 +2357,7 @@ class Registry:
         contract: dict[str, Any],
         *,
         task_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Atomically create, bind, and share a runnable group task."""
 
@@ -2299,6 +2366,9 @@ class Registry:
         if not SESSION_ID.fullmatch(sid):
             raise RegistryError("session_id 必须是 Codex UUID")
         task_name = _text(name, "task name", 160)
+        contract = dict(contract)
+        if idempotency_key is not None:
+            contract["source_message_id"] = _text(idempotency_key, "message_id", 160)
         _, contract_json = _json_object(contract, "contract")
         timestamp = now()
         with self._connect() as connection:
@@ -2317,6 +2387,16 @@ class Registry:
             ).fetchone()
             if shared is None or str(shared["access"]) != "write":
                 raise AuthorizationDenied("目标 Session 未以可指导权限共享到当前群组")
+            existing = connection.execute(
+                "SELECT t.owner_user_id, t.contract_json FROM tasks t "
+                "JOIN task_groups tg ON tg.task_id=t.task_id AND tg.group_id=? "
+                "JOIN task_sessions ts ON ts.task_id=t.task_id AND ts.session_id=? "
+                "WHERE t.task_id=?", (group["group_id"], sid, tid),
+            ).fetchone()
+            if existing is not None and idempotency_key is not None \
+                    and existing["owner_user_id"] == owner["user_id"] \
+                    and existing["contract_json"] == contract_json:
+                return self.get_task(tid)
             try:
                 connection.execute(
                     "INSERT INTO tasks(task_id, owner_user_id, name, contract_json, status, created_at, updated_at) "
@@ -2554,6 +2634,144 @@ class Registry:
             connection.execute("DELETE FROM task_groups WHERE task_id = ? AND group_id = ?", (tid, group["group_id"]))
             return {**dict(row), "unshared": True}
 
+    def _shared_task_context(
+        self, connection: sqlite3.Connection, chat_id: str, open_id: str, task_id: str,
+        *, write: bool = True,
+    ) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row]:
+        group = self._group_row(connection, chat_id)
+        user = self._user_row(connection, open_id)
+        task = self._task_row(connection, task_id)
+        member = connection.execute(
+            "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
+            (group["group_id"], user["user_id"]),
+        ).fetchone()
+        share = connection.execute(
+            "SELECT access FROM task_groups WHERE task_id = ? AND group_id = ?",
+            (task["task_id"], group["group_id"]),
+        ).fetchone()
+        if user["status"] != "approved" or member is None or share is None:
+            raise AuthorizationDenied("用户无权查看该群任务")
+        if write and share["access"] != "write":
+            raise AuthorizationDenied("该群任务只读")
+        return group, user, task
+
+    def task_queue(self, chat_id: str, open_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            group = self._group_row(connection, chat_id)
+            user = self._user_row(connection, open_id)
+            if user["status"] != "approved" or connection.execute(
+                "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
+                (group["group_id"], user["user_id"]),
+            ).fetchone() is None:
+                raise AuthorizationDenied("用户不是已批准的群成员")
+            rows = connection.execute(
+                "SELECT t.*, tg.access, c.claim_id, c.status AS claim_status, "
+                "u.display_name AS claimant, cr.user_id AS credited_user_id "
+                "FROM task_groups tg JOIN tasks t ON t.task_id = tg.task_id "
+                "LEFT JOIN task_queue_claims c ON c.task_id = t.task_id AND c.status IN ('active','submitted') "
+                "LEFT JOIN users u ON u.user_id = c.user_id "
+                "LEFT JOIN task_credits cr ON cr.task_id = t.task_id "
+                "WHERE tg.group_id = ? ORDER BY t.updated_at DESC, t.task_id",
+                (group["group_id"],),
+            )
+            return [self._task_dict(row) for row in rows]
+
+    def claim_shared_task(self, chat_id: str, open_id: str, task_id: str) -> dict[str, Any]:
+        tid = _identifier(task_id, "task_id")
+        timestamp = now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            group, user, task = self._shared_task_context(connection, chat_id, open_id, tid)
+            if task["status"] not in {"planned", "running"}:
+                raise RegistryError("任务已经结束")
+            contract = self._task_dict(task)["contract"]
+            if not isinstance(contract.get("acceptance"), list) or not contract["acceptance"]:
+                raise RegistryError("任务需要明确的验收标准才能领取")
+            current = connection.execute(
+                "SELECT * FROM task_queue_claims WHERE task_id = ? AND status IN ('active','submitted')",
+                (tid,),
+            ).fetchone()
+            if current is not None:
+                if current["user_id"] == user["user_id"]:
+                    return dict(current)
+                raise RegistryError("任务已由其他成员领取")
+            claim_id = f"claim-{secrets.token_hex(8)}"
+            connection.execute(
+                "INSERT INTO task_queue_claims(claim_id,task_id,group_id,user_id,status,claimed_at) "
+                "VALUES(?,?,?,?, 'active', ?)",
+                (claim_id, tid, group["group_id"], user["user_id"], timestamp),
+            )
+            connection.execute("UPDATE tasks SET status = 'running', updated_at = ? WHERE task_id = ?", (timestamp, tid))
+            self._audit(connection, open_id, "claim_shared_task", "task", tid, claim_id)
+            connection.commit()
+            return dict(connection.execute("SELECT * FROM task_queue_claims WHERE claim_id = ?", (claim_id,)).fetchone())
+
+    def release_shared_task(self, chat_id: str, open_id: str, task_id: str) -> dict[str, Any]:
+        tid = _identifier(task_id, "task_id")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _, user, task = self._shared_task_context(connection, chat_id, open_id, tid)
+            current = connection.execute(
+                "SELECT * FROM task_queue_claims WHERE task_id = ? AND status IN ('active','submitted')",
+                (tid,),
+            ).fetchone()
+            if current is None:
+                raise RegistryError("任务当前无人领取")
+            if user["user_id"] not in {current["user_id"], task["owner_user_id"]}:
+                raise AuthorizationDenied("只有领取者或负责人可以释放任务")
+            timestamp = now()
+            connection.execute(
+                "UPDATE task_queue_claims SET status='released', closed_at=? WHERE claim_id=?",
+                (timestamp, current["claim_id"]),
+            )
+            connection.execute("UPDATE tasks SET status='planned', updated_at=? WHERE task_id=?", (timestamp, tid))
+            self._audit(connection, open_id, "release_shared_task", "task", tid, str(current["claim_id"]))
+            connection.commit()
+            return dict(connection.execute("SELECT * FROM task_queue_claims WHERE claim_id=?", (current["claim_id"],)).fetchone())
+
+    def submit_shared_task(self, chat_id: str, open_id: str, task_id: str, evidence_id: str) -> dict[str, Any]:
+        tid = _identifier(task_id, "task_id")
+        eid = _identifier(evidence_id, "evidence_id")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _, user, _ = self._shared_task_context(connection, chat_id, open_id, tid)
+            claim = connection.execute(
+                "SELECT * FROM task_queue_claims WHERE task_id=? AND status IN ('active','submitted')",
+                (tid,),
+            ).fetchone()
+            if claim is None or claim["user_id"] != user["user_id"]:
+                raise AuthorizationDenied("只有当前领取者可以提交")
+            if claim["status"] == "submitted":
+                if claim["evidence_id"] == eid:
+                    return dict(claim)
+                raise RegistryError("任务已提交，先释放或等待验收")
+            evidence = self._evidence_row(connection, eid)
+            creator = self._user_row(connection, str(evidence["created_by"]))
+            if evidence["task_id"] != tid or creator["user_id"] != user["user_id"] or evidence["created_at"] < claim["claimed_at"]:
+                raise AuthorizationDenied("证据不属于当前领取者的本次任务")
+            timestamp = now()
+            connection.execute(
+                "UPDATE task_queue_claims SET status='submitted', evidence_id=?, submitted_at=? WHERE claim_id=?",
+                (eid, timestamp, claim["claim_id"]),
+            )
+            self._audit(connection, open_id, "submit_shared_task", "task", tid, eid)
+            connection.commit()
+            return dict(connection.execute("SELECT * FROM task_queue_claims WHERE claim_id=?", (claim["claim_id"],)).fetchone())
+
+    def current_shared_task_claim(
+        self, chat_id: str, open_id: str, task_id: str, *, evidence_id: str | None = None,
+    ) -> dict[str, Any]:
+        tid = _identifier(task_id, "task_id")
+        with self._connect() as connection:
+            _, user, _ = self._shared_task_context(connection, chat_id, open_id, tid)
+            claim = connection.execute(
+                "SELECT * FROM task_queue_claims WHERE task_id=? AND status IN ('active','submitted') AND user_id=?",
+                (tid, user["user_id"]),
+            ).fetchone()
+            if claim is None or (claim["status"] == "submitted" and claim["evidence_id"] != evidence_id):
+                raise AuthorizationDenied("只有当前领取者可以提交")
+            return dict(claim)
+
     def authorize_task(
         self,
         open_id: str,
@@ -2569,7 +2787,7 @@ class Registry:
         if not SESSION_ID.fullmatch(sid):
             raise AuthorizationDenied("session_id 无效")
         decision = self.authorize(open_id, chat_id, sid, action)
-        required = "read" if action in {"read", "notify"} else "write"
+        required = "read" if action in {"read", "notify", "history_search"} else "write"
         with self._connect() as connection:
             task = self._task_row(connection, tid)
             attached = connection.execute(
@@ -3225,6 +3443,56 @@ class Registry:
                 "unshared": True,
             }
 
+    def set_history_search(self, chat_id: str, owner_reference: str, session_id: str, *, enabled: bool) -> dict[str, Any]:
+        sid = _text(session_id, "session_id", 80).lower()
+        if not SESSION_ID.fullmatch(sid):
+            raise RegistryError("session_id 必须是 Codex UUID")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            group = self._group_row(connection, chat_id)
+            owner = self._user_row(connection, owner_reference)
+            session = connection.execute(
+                "SELECT i.user_id FROM sessions s JOIN installations i ON i.installation_id=s.installation_id "
+                "WHERE s.session_id=?", (sid,),
+            ).fetchone()
+            member = connection.execute(
+                "SELECT 1 FROM group_members WHERE group_id=? AND user_id=?",
+                (group["group_id"], owner["user_id"]),
+            ).fetchone()
+            share = connection.execute(
+                "SELECT 1 FROM session_shares WHERE group_id=? AND session_id=?",
+                (group["group_id"], sid),
+            ).fetchone()
+            if owner["status"] != "approved" or session is None or session["user_id"] != owner["user_id"] or member is None or share is None:
+                raise AuthorizationDenied("只有已共享 Session 的所有者可以设置历史检索")
+            if enabled:
+                connection.execute(
+                    "INSERT INTO session_history_shares(group_id,session_id,enabled_by,enabled_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(group_id,session_id) DO UPDATE SET enabled_by=excluded.enabled_by, enabled_at=excluded.enabled_at",
+                    (group["group_id"], sid, owner["user_id"], now()),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM session_history_shares WHERE group_id=? AND session_id=?",
+                    (group["group_id"], sid),
+                )
+            self._audit(connection, str(owner["feishu_open_id"]), "set_history_search", "session", sid, str(enabled))
+            connection.commit()
+            return {"group_id": str(group["group_id"]), "session_id": sid, "enabled": enabled}
+
+    def authorize_history_search(self, open_id: str, chat_id: str, session_id: str) -> dict[str, Any]:
+        if not str(chat_id or "").strip():
+            raise AuthorizationDenied("历史检索只能在群组中使用")
+        decision = self.authorize(open_id, chat_id, session_id, "read")
+        with self._connect() as connection:
+            enabled = connection.execute(
+                "SELECT 1 FROM session_history_shares WHERE group_id=? AND session_id=?",
+                (decision["group_id"], decision["session_id"]),
+            ).fetchone()
+            if enabled is None:
+                raise AuthorizationDenied("Session 所有者尚未开放历史检索")
+        return decision
+
     def subscribe(self, group_reference: str, user_reference: str, session_id: str | None = None) -> dict[str, Any]:
         sid = _text(session_id, "session_id", 80).lower() if session_id else None
         timestamp = now()
@@ -3264,7 +3532,7 @@ class Registry:
         """
 
         action = _text(action, "action")
-        required = "read" if action in {"read", "notify"} else "write"
+        required = "read" if action in {"read", "notify", "history_search"} else "write"
         sid = _text(session_id, "session_id", 80).lower()
         chat = str(chat_id or "").strip()
         with self._connect() as connection:
@@ -3336,7 +3604,10 @@ class Registry:
         task_id: str | None = None,
     ) -> bool:
         message_id = _text(message_id, "message_id", 160)
-        if task_id:
+        if action == "history_search" and not task_id:
+            decision = self.authorize_history_search(open_id, str(chat_id or ""), session_id)
+            task_reference = None
+        elif task_id:
             decision = self.authorize_task(open_id, chat_id, task_id, session_id, action)
             task_reference = str(decision["task_id"])
         else:
@@ -3345,6 +3616,15 @@ class Registry:
         timestamp = now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if action == "history_search":
+                allowed = connection.execute(
+                    "SELECT 1 FROM session_history_shares hs JOIN session_shares ss "
+                    "ON ss.group_id=hs.group_id AND ss.session_id=hs.session_id "
+                    "WHERE hs.group_id=? AND hs.session_id=?",
+                    (decision["group_id"], decision["session_id"]),
+                ).fetchone()
+                if allowed is None:
+                    raise AuthorizationDenied("历史检索授权已撤销")
             existing = connection.execute("SELECT status, lease_until FROM commands WHERE message_id = ?", (message_id,)).fetchone()
             if existing is not None:
                 if existing["status"] in {"completed", "failed"} or int(existing["lease_until"] or 0) >= timestamp:

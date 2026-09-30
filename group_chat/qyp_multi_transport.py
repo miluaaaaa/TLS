@@ -1114,6 +1114,7 @@ class TransportStore:
             payload["task_id"] = str(task_id)
         if extra:
             payload.update(extra)
+        payload["action"] = action
         _, payload_json = _json_object(payload, "command payload")
         command_id = "cmd_" + uuid.uuid4().hex
         timestamp = now()
@@ -1350,6 +1351,14 @@ class TransportStore:
             )):
                 connection.rollback()
                 raise TransportError("command lease lost")
+            if row["action"] == "history_search" and status == "completed":
+                try:
+                    self.registry.authorize_history_search(str(row["open_id"]), str(row["chat_id"]), str(row["session_id"]))
+                except RegistryError:
+                    status = "failed"
+                    error = "history-authorization-revoked"
+                    result_value = {}
+                    result_json = "{}"
             connection.execute(
                 "UPDATE agent_commands SET status = ?, lease_until = 0, updated_at = ?, result_json = ?, last_error = ?, "
                 "transcript_proof = ?, turn_id = ? "

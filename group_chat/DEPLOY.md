@@ -109,6 +109,45 @@ python3 group_chat/session_policy.py validate
 
 Run the Agent as the same OS user as Codex.
 
+## Team workflow
+
+These commands are sent in the registered group while mentioning the bot.
+The task creator becomes its owner. Every task needs a visible acceptance
+criterion after `|`; a member can then claim it. Credit is recorded only
+after the owner verifies the submitted evidence and approves the task.
+
+```text
+@bot /task task-demo 019ffaf4-eccd-7203-b5b4-51d967ec128b Ship feature | Tests pass
+@bot /tasks
+@bot /claim task-demo
+@bot /submit task-demo commit:abc123
+@bot /verify task-demo evidence-<id>
+@bot /approve task-demo
+```
+
+`/release task-demo` returns a claim to the shared queue so another member
+can take over. Approval attributes credit to the final submitted claimant,
+even if someone else worked on an earlier released claim. This credit is
+team attribution metadata, not money, billing, or model usage accounting.
+The owner may release a stale claim; the current claimant may also release
+their own claim. Group membership and task write access are checked for each
+change.
+
+The Session owner can separately opt a shared Session into history search:
+
+```text
+@bot /history-on 019ffaf4-eccd-7203-b5b4-51d967ec128b
+@bot /history 019ffaf4-eccd-7203-b5b4-51d967ec128b architecture
+@bot /history-off 019ffaf4-eccd-7203-b5b4-51d967ec128b
+```
+
+Search requires group read access and an Agent-side Session allowlist entry.
+It scans up to 64 MiB of the local transcript and returns the five most
+recent short text matches. The raw JSONL stays local, but queries and result
+snippets are stored in the transport database and posted to the group. A
+revoked search share suppresses unsent results. Use this only when all group
+members are allowed to read the Session content.
+
 ## Verify
 
 ```bash
@@ -123,3 +162,7 @@ turn uses the same session once. Revoke the share; the next write must fail.
 Simulate a transient Feishu send failure and restart the Agent during a long
 turn; confirm the reply appears once and the lease is renewed. Keep actual
 IDs and timestamps in a private log. Local tests do not replace this probe.
+For team workflow acceptance, race two members for one claim, release and
+reclaim it, verify a submitted evidence item, and confirm exactly one credit
+for the approved finisher. Disable history search before a pending result is
+sent and confirm no snippet appears in the group.

@@ -105,6 +105,44 @@ class FeishuIngressTests(unittest.TestCase):
         with self.assertRaises(AuthorizationDenied):
             process_message(self.event("om_next", "continue", mentioned="", parent_id="om_bot"), self.routes, self.transport)
 
+    def test_team_commands_create_claim_submit_verify_and_credit(self) -> None:
+        self.registry.add_user("ou_builder", "Builder", user_id="builder", status="approved")
+        self.registry.add_group_member("team", "ou_builder")
+        create = self.event("om_task", f"/task task-demo {SESSION} Ship feature | Tests pass")
+        self.assertEqual(process_message(create, self.routes, self.transport), "task-created")
+        self.assertEqual(process_message(create, self.routes, self.transport), "task-created")
+        with self.assertRaisesRegex(Exception, "领取者"):
+            process_message(self.event("om_early", "/approve task-demo"), self.routes, self.transport)
+        self.assertEqual(process_message(self.event("om_claim", "/claim task-demo", open_id="ou_builder"), self.routes, self.transport), "task-claimed")
+        self.assertEqual(process_message(self.event("om_submit", "/submit task-demo commit:abc123", open_id="ou_builder"), self.routes, self.transport), "task-submitted")
+        self.assertEqual(process_message(self.event("om_submit", "/submit task-demo commit:abc123", open_id="ou_builder"), self.routes, self.transport), "task-submitted")
+        evidence = self.registry.list_evidence("task-demo")[0]
+        self.assertEqual(len(self.registry.list_evidence("task-demo")), 1)
+        self.assertEqual(process_message(self.event("om_verify", f"/verify task-demo {evidence['evidence_id']}"), self.routes, self.transport), "task-verified")
+        self.assertEqual(process_message(self.event("om_approve", "/approve task-demo"), self.routes, self.transport), "task-approved")
+        self.assertEqual(process_message(self.event("om_approve", "/approve task-demo"), self.routes, self.transport), "task-approved")
+        self.assertEqual(self.registry.task_queue("oc_team", "ou_owner")[0]["credited_user_id"], "builder")
+
+    def test_history_search_is_queued_only_with_consent_and_revocation_scrubs_result(self) -> None:
+        self.registry.add_user("ou_builder", "Builder", user_id="builder", status="approved")
+        self.registry.add_group_member("team", "ou_builder")
+        request = self.event("om_history", f"/history {SESSION} architecture", open_id="ou_builder")
+        with self.assertRaises(AuthorizationDenied):
+            process_message(request, self.routes, self.transport)
+        self.assertEqual(process_message(self.event("om_optin", f"/history-on {SESSION}"), self.routes, self.transport), "history-toggle")
+        self.assertEqual(process_message(request, self.routes, self.transport), "queued")
+        command = self.transport.poll(self.pair["token"])[0]
+        self.assertEqual(command["action"], "history_search")
+        self.assertEqual(command["payload"]["query"], "architecture")
+        self.assertEqual(process_message(self.event("om_optout", f"/history-off {SESSION}"), self.routes, self.transport), "history-toggle")
+        self.transport.complete(self.pair["token"], command["command_id"], status="completed", result={"answer": "private snippet"})
+        event = self.transport.next_event()
+        self.assertEqual(event["payload"]["result"], {})
+        self.assertEqual(event["payload"]["status"], "failed")
+        with mock.patch("feishu_group_ingress.send_reply", return_value="om_reply") as send:
+            publish_one(None, self.routes, self.transport)
+        self.assertNotIn("private snippet", send.call_args.args[2])
+
 
 if __name__ == "__main__":
     unittest.main()

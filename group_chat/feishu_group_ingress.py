@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from qyp_multi_feishu import authorize_group_event, ensure_group_member, registered_group, shared_session
+from qyp_multi_feishu import authorize_group_event, ensure_group_member, registered_group, registry, shared_session
 from qyp_multi_registry import AuthorizationDenied, RegistryError
 from qyp_multi_transport import TransportStore
 
@@ -23,6 +23,12 @@ from qyp_multi_transport import TransportStore
 LOG = logging.getLogger("tls.feishu_group_ingress")
 SESSION_ID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
 EXPLICIT_SESSION = re.compile(r"^/session\s+(\S+)\s+(.+)$", re.I | re.S)
+TASK_CREATE = re.compile(r"^/task\s+([A-Za-z0-9_.:-]{1,160})\s+(\S+)\s+(.+?)\s+\|\s+(.+)$", re.I | re.S)
+TASK_ACTION = re.compile(r"^/(claim|release|approve)\s+([A-Za-z0-9_.:-]{1,160})$", re.I)
+TASK_SUBMIT = re.compile(r"^/submit\s+([A-Za-z0-9_.:-]{1,160})\s+(.+)$", re.I | re.S)
+TASK_VERIFY = re.compile(r"^/verify\s+([A-Za-z0-9_.:-]{1,160})\s+([A-Za-z0-9_.:-]{1,160})$", re.I)
+HISTORY_TOGGLE = re.compile(r"^/history-(on|off)\s+(\S+)$", re.I)
+HISTORY_SEARCH = re.compile(r"^/history\s+(\S+)\s+(.+)$", re.I | re.S)
 MAX_REPLY = 4000
 
 
@@ -129,7 +135,83 @@ def parse_message(data: Any) -> dict[str, str] | None:
     return result
 
 
-def process_message(event: dict[str, str], routes: RouteStore, transport: TransportStore) -> str:
+def _team_command(event: dict[str, str], transport: TransportStore) -> tuple[str, str] | None:
+    text = event["text"]
+    selected = registry()
+    chat_id, open_id = event["chat_id"], event["open_id"]
+    if text.lower() == "/tasks":
+        tasks = selected.task_queue(chat_id, open_id)
+        lines = [
+            f"{task['task_id']} | {task['name']} | {task['status']} | "
+            f"{task.get('claimant') or 'available'}"
+            for task in tasks[:20]
+        ]
+        return "task-list", "\n".join(lines) if lines else "当前没有共享任务。"
+    match = TASK_CREATE.fullmatch(text)
+    if match:
+        task_id, session_id, objective, acceptance = match.groups()
+        created = selected.create_group_task(
+            chat_id, open_id, session_id, objective.strip(),
+            {"objective": objective.strip(), "acceptance": [acceptance.strip()], "team_queue": True},
+            task_id=task_id, idempotency_key=event["message_id"],
+        )
+        return "task-created", f"任务已创建：{created['task_id']}。验收标准：{acceptance.strip()}"
+    match = TASK_ACTION.fullmatch(text)
+    if match:
+        action, task_id = match.groups()
+        action = action.lower()
+        if action == "claim":
+            claim = selected.claim_shared_task(chat_id, open_id, task_id)
+            return "task-claimed", f"已领取 {task_id}：{claim['claim_id']}"
+        if action == "release":
+            selected.release_shared_task(chat_id, open_id, task_id)
+            return "task-released", f"{task_id} 已回到待领取队列。"
+        visible = {task["task_id"] for task in selected.task_queue(chat_id, open_id)}
+        if task_id not in visible:
+            raise AuthorizationDenied("任务未共享到当前群")
+        approved = selected.approve_task(task_id, open_id)
+        credit = approved.get("credit")
+        return "task-approved", f"{task_id} 已验收。Credit: {credit['user_id'] if credit else '无领取记录'}"
+    match = TASK_SUBMIT.fullmatch(text)
+    if match:
+        task_id, source = match.groups()
+        evidence_id = "evidence-" + hashlib.sha256(event["message_id"].encode()).hexdigest()[:16]
+        selected.current_shared_task_claim(chat_id, open_id, task_id, evidence_id=evidence_id)
+        existing = next((item for item in selected.list_evidence(task_id) if item["evidence_id"] == evidence_id), None)
+        if existing is None:
+            selected.record_evidence(
+                task_id, "submission", "Task submission", evidence_id=evidence_id,
+                uri=source.strip()[:1000] if source.strip().startswith(("https://", "commit:", "sha256:")) else "",
+                summary=source.strip()[:2000], created_by=open_id,
+            )
+        selected.submit_shared_task(chat_id, open_id, task_id, evidence_id)
+        return "task-submitted", f"{task_id} 已提交证据 {evidence_id}，等待负责人验证和验收。"
+    match = TASK_VERIFY.fullmatch(text)
+    if match:
+        task_id, evidence_id = match.groups()
+        visible = {task["task_id"] for task in selected.task_queue(chat_id, open_id)}
+        if task_id not in visible:
+            raise AuthorizationDenied("任务未共享到当前群")
+        selected.verify_evidence_as_task_owner(task_id, evidence_id, open_id)
+        return "task-verified", f"证据 {evidence_id} 已验证。"
+    match = HISTORY_TOGGLE.fullmatch(text)
+    if match:
+        mode, session_id = match.groups()
+        result = selected.set_history_search(chat_id, open_id, session_id, enabled=mode.lower() == "on")
+        return "history-toggle", f"历史检索已{'开启' if result['enabled'] else '关闭'}：{result['session_id']}"
+    match = HISTORY_SEARCH.fullmatch(text)
+    if match:
+        session_id, query = match.groups()
+        selected.authorize_history_search(open_id, chat_id, session_id)
+        queued = transport.enqueue(
+            message_id=event["message_id"], open_id=open_id, chat_id=chat_id,
+            session_id=session_id, text=query.strip(), action="history_search", extra={"query": query.strip()},
+        )
+        return ("duplicate" if queued.get("duplicate") else "queued"), ""
+    return None
+
+
+def process_message(event: dict[str, str], routes: RouteStore, transport: TransportStore, client: Any | None = None) -> str:
     chat_id, open_id = event["chat_id"], event["open_id"]
     if registered_group(chat_id) is None:
         return "ignored"
@@ -137,6 +219,12 @@ def process_message(event: dict[str, str], routes: RouteStore, transport: Transp
     if not event.get("mentioned") and not reply_target:
         return "ignored"
     ensure_group_member(chat_id, open_id)
+    management = _team_command(event, transport)
+    if management is not None:
+        status, reply = management
+        if reply and client is not None:
+            send_reply(client, event["message_id"], reply, "team-command:" + event["message_id"])
+        return status
     text = event["text"]
     match = EXPLICIT_SESSION.fullmatch(text)
     if match:
@@ -187,6 +275,11 @@ def publish_one(client: Any, routes: RouteStore, transport: TransportStore) -> b
     source_id = str(payload["message_id"])
     result = payload.get("result") or {}
     answer = str(result.get("answer") or result.get("text") or payload.get("error") or "Codex completed")
+    if payload.get("request", {}).get("action") == "history_search":
+        try:
+            transport.registry.authorize_history_search(str(payload["open_id"]), str(payload["chat_id"]), str(payload["session_id"]))
+        except RegistryError:
+            answer = "历史检索授权已撤销，结果未发送。"
     try:
         reply_id = send_reply(client, source_id, answer, "agent-event:" + str(claimed["event_id"]))
         routes.bind(source_id, reply_id, str(payload["chat_id"]), str(payload["session_id"]))
@@ -203,10 +296,15 @@ def process_loop(client: Any, routes: RouteStore, transport: TransportStore, sto
         event = routes.next_message()
         if event is not None:
             try:
-                process_message(event, routes, transport)
+                process_message(event, routes, transport, client)
             except (AuthorizationDenied, RegistryError) as exc:
                 LOG.info("group command rejected: %s", exc)
-                routes.finish(event["message_id"])
+                try:
+                    if event["text"].startswith("/"):
+                        send_reply(client, event["message_id"], str(exc)[:300], "team-error:" + event["message_id"])
+                    routes.finish(event["message_id"])
+                except Exception:
+                    LOG.exception("group error reply failed; inbox item retained")
             except Exception:
                 LOG.exception("group command processing failed; inbox item retained")
                 stop.wait(2.0)

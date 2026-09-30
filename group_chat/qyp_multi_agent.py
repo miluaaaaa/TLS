@@ -9,6 +9,7 @@ back a short result.  No transcript or local socket is uploaded.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import fcntl
 import json
 import logging
@@ -702,6 +703,44 @@ def transcript_snapshot(transcript: Path, limit: int = 3) -> str:
     return "最近 3 条消息：\n" + "\n".join(entries[-limit:]) if entries else "该会话尚无可读取消息。"
 
 
+def search_transcript(transcript: Path, query: str, *, limit: int = 5) -> str:
+    term = " ".join(str(query).split()).strip()
+    if len(term) < 2 or len(term) > 80:
+        raise AgentError("history-query-length-invalid")
+    matches: deque[str] = deque(maxlen=limit)
+    scanned = 0
+    truncated = False
+    try:
+        with transcript.open("rb") as handle:
+            for raw in handle:
+                scanned += len(raw)
+                if scanned > 64 * 1024 * 1024:
+                    truncated = True
+                    break
+                if len(raw) > 1024 * 1024:
+                    continue
+                try:
+                    record = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                payload = record.get("payload") if isinstance(record, dict) else None
+                if not isinstance(payload, dict) or record.get("type") != "response_item" or payload.get("role") not in {"user", "assistant"}:
+                    continue
+                content = " ".join(message_text(payload).split())
+                offset = content.casefold().find(term.casefold())
+                if offset < 0:
+                    continue
+                start = max(0, offset - 90)
+                snippet = content[start : start + 240]
+                snippet = re.sub(r"(?i)(bearer\s+|api[_-]?key\s*[=:]\s*|sk-)[A-Za-z0-9_.-]{8,}", "[redacted]", snippet)
+                matches.append(f"{'用户' if payload['role'] == 'user' else 'Codex'}：{snippet}")
+    except OSError as exc:
+        raise AgentError("history-read-failed") from exc
+    if not matches:
+        return "未找到匹配的会话记录。" + ("（只检索了前 64 MiB）" if truncated else "")
+    return f"最近 {len(matches)} 条匹配：\n" + "\n".join(matches) + ("\n（只检索了前 64 MiB）" if truncated else "")
+
+
 def _process_command(
     config: dict[str, str],
     command: dict[str, Any],
@@ -718,6 +757,14 @@ def _process_command(
         return "failed"
     if str(command.get("action", "")) == "snapshot":
         complete_request(config, {"command_id": command_id, "attempts": attempts, "writer_epoch": writer_epoch, "status": "completed", "result": {"answer": transcript_snapshot(transcript), "session_id": session_id, "snapshot": True}})
+        return "completed"
+    if str(command.get("action", "")) == "history_search":
+        try:
+            answer = search_transcript(transcript, str(payload.get("query", "")))
+        except AgentError as exc:
+            _complete_failed_command(config, command_id, str(exc), session_id, attempts, writer_epoch)
+            return "failed"
+        complete_request(config, {"command_id": command_id, "attempts": attempts, "writer_epoch": writer_epoch, "status": "completed", "result": {"answer": answer, "session_id": session_id, "history_search": True}})
         return "completed"
     runtime = _runtime_for(session_id, transcript)
     if runtime is None:

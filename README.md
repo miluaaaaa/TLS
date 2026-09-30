@@ -4,7 +4,9 @@ TLS connects Feishu conversations to explicitly authorized Codex sessions.
 The repository contains a legacy single-user pairing protocol and a newer
 [group-chat implementation](group_chat/README.md). The group-chat source now
 includes the Feishu long-connection consumer, durable reply bindings, and
-local Codex bridge. Follow the [deployment guide](group_chat/DEPLOY.md).
+local Codex bridge. It also supports shared task claims, evidence-based
+approval, and owner-enabled session history search. Follow the
+[deployment guide](group_chat/DEPLOY.md).
 
 ## Group chat
 
