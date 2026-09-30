@@ -1,4 +1,5 @@
 import sys
+import os
 import tempfile
 import threading
 import unittest
@@ -17,6 +18,21 @@ SESSION_ID = "019ffaf4-eccd-7203-b5b4-51d967ec128b"
 
 
 class CompleteReportingTests(unittest.TestCase):
+    def setUp(self):
+        self.policy_dir = tempfile.TemporaryDirectory()
+        allowed = Path(self.policy_dir.name) / "included-sessions"
+        allowed.write_text(SESSION_ID + "\n", encoding="utf-8")
+        self.policy_env = mock.patch.dict(os.environ, {
+            "TLS_INCLUDED_SESSIONS_FILE": str(allowed),
+            "TLS_EXCLUDED_SESSIONS_FILE": str(Path(self.policy_dir.name) / "excluded-sessions"),
+            "TLS_MONITOR_ALL_SESSIONS": "0",
+        })
+        self.policy_env.start()
+
+    def tearDown(self):
+        self.policy_env.stop()
+        self.policy_dir.cleanup()
+
     def command(self):
         return {
             "command_id": "cmd-test",

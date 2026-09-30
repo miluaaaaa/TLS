@@ -96,7 +96,18 @@ python3 group_chat/qyp_multi_agent.py daemon
 
 Pairing writes a mode-600 `~/.config/tls/agent.env`. Set `TLS_CODEX_HOME`,
 `TLS_CODEX_RUNTIME_ROOTS`, or `TLS_AGENT_SESSION_IDS` when Codex uses
-non-default paths. Run the Agent as the same OS user as Codex.
+non-default paths. The session policy is fail-closed: list each allowed
+session UUID in `~/.config/tls/included-sessions` (one per line, mode 600)
+before starting the Agent. For the example session:
+
+```bash
+install -d -m 700 "$HOME/.config/tls"
+printf '%s\n' '019ffaf4-eccd-7203-b5b4-51d967ec128b' > "$HOME/.config/tls/included-sessions"
+chmod 600 "$HOME/.config/tls/included-sessions"
+python3 group_chat/session_policy.py validate
+```
+
+Run the Agent as the same OS user as Codex.
 
 ## Verify
 
