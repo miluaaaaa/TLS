@@ -1,52 +1,59 @@
-# TLS Pairing
+# TLS
 
-Give this repository URL to an existing Codex Agent.
+TLS connects Feishu conversations to explicitly authorized Codex sessions.
+The repository contains a legacy single-user pairing protocol and a newer
+[group-chat control plane](group_chat/README.md). The group control plane is a
+library and gateway; a Feishu event consumer and a local Codex delivery bridge
+must be connected by the deployer. See the [integration contract](group_chat/INTEGRATION.md)
+before enabling a bot.
 
-## Pair
+## Group chat
 
-1. Open the published TLS bot in Feishu and send `/pair` in a private chat.
-2. Copy the one-time pairing code returned by the bot to the Agent.
-3. The Agent runs this command on the user's computer:
+The group implementation keeps users, installations, sessions, group
+memberships, and session shares in a SQLite registry. A group message never
+falls back to a private session. A writable, explicitly shared session is
+required before a command can be queued. The gateway stores commands and
+results durably; an installation-side Agent polls it over HTTPS.
 
-   ```bash
-   python3 tls_pair.py pair --code '<ONE_TIME_PAIRING_CODE>'
-   ```
+Start with the [group-chat setup and limitations](group_chat/README.md). The
+[development history](group_chat/GROUP_CHAT_HISTORY.md) separates verified
+routing and regression tests from the group reply/continuation workflow that
+still needs a fresh end-to-end acceptance run.
 
-The helper exchanges the code for a local Agent credential and stores it in
-`~/.config/tls/agent.env`. It also installs and enables the local TLS Fault
-Healer protocol. The credential must stay on the user's computer.
+## Legacy pairing
 
-## Fault Healer Protocol
+The root-level `tls_multi_*`, `tls_pair.py`, and `tls_fault_healer.py` files are
+the earlier protocol. An existing Feishu bot may issue a one-time code in a
+private chat. On a user's computer, the legacy helper can exchange it for an
+Agent credential:
 
-Each successful pairing accepts the TLS Fault Healer protocol for that machine.
-The helper installs `~/.config/tls/runtime/tls_fault_healer.py`, writes its
-enabled state into `agent.env`, and enables a user-level retry timer when
-systemd is available. The component creates one bounded local Codex diagnosis
-only after the local TLS bridge reports a hard delivery failure. It may repair
-the local bridge, heartbeat, or managed proxy; it never changes the gateway or
-Feishu, rebinds a Codex session, or replays a user message.
+```bash
+python3 tls_pair.py pair --code '<ONE_TIME_CODE>' --url 'https://your-gateway.example/tls-agent'
+```
 
-A TLS bridge integrates it by invoking the configured
-`TLS_FAULT_HEALER_SCRIPT trigger --reason ... --session-id ... --command-id ...`
-when it reports a hard command/heartbeat failure. Pairing installs this
-protocol but does not retrofit an unrelated pre-existing bridge: that bridge
-must make this explicit trigger call to report its failures.
+The credential is stored under `~/.config/tls/agent.env` and must remain local.
+The optional Fault Healer only acts when a local bridge explicitly reports a
+hard failure; installation alone does not retrofit another bridge.
 
-## Finding the TLS Bot
+## Feishu app
 
-The TLS bot must be published as a Feishu application before new users can find it.
+The operator must create and publish a Feishu app, grant the required message
+and card permissions, and make the bot visible to the intended users or groups.
+Adding a bot to a group does not grant access to any Codex session. Register
+the group and explicitly share sessions through the registry first.
 
-- In the same Feishu tenant, publish the app and include the intended users in its visibility
-  scope. Users can then search the published bot name in Feishu and open a private chat.
-- To use TLS in a group, a group administrator adds the bot to the group.
-- For users or groups outside the tenant, enable the app's external sharing capability and
-  publish the required version.
+No real app ID, bot name, tenant address, session ID, or production log is
+included in this repository. See [security guidance](SECURITY.md).
 
-GitHub cannot automatically add a Feishu bot to a user's tenant. The final README should include
-the published TLS bot name or a direct Feishu entry link.
+## Development
 
-## Protocol Note
+The group core uses Python 3.10 or later and the standard library. Run its
+dependency-free tests with:
 
-The current server issues the pairing code after the user sends `/pair`. An Agent-generated code
-followed by `/pair <code>` requires a separate challenge endpoint and a Feishu ingress update; it
-is not enabled by the current server.
+```bash
+PYTHONPATH=group_chat python3 -m unittest discover -s group_chat/tests -q
+```
+
+Agent integration tests in `group_chat/integration_tests` additionally require
+the local Codex bridge modules described in the integration contract. The
+root-level legacy modules retain their original test suite under `tests/`.

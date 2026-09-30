@@ -17,7 +17,7 @@ class PairHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             config = Path(root) / "config" / "agent.env"
             args = argparse.Namespace(
-                url="https://api.xhqcode.com/tls-agent",
+                url="https://gateway.example.test/tls-agent",
                 code="PAIR-CODE",
                 code_stdin=False,
                 name="test-agent",

@@ -4,3 +4,11 @@ __pycache__/
 *.sqlite3
 *.env
 *.env.*
+*.db
+*.sqlite3-*
+*.log
+*.jsonl
+.coverage
+htmlcov/
+dist/
+build/

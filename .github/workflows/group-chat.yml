@@ -1,0 +1,23 @@
+name: Group chat checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile group chat modules
+        run: python -m compileall -q group_chat
+      - name: Run dependency-free core tests
+        run: PYTHONPATH=group_chat:. python -m unittest discover -s group_chat/tests -q
+      - name: Run legacy tests
+        run: python -m unittest discover -s tests -q

@@ -1,0 +1,8 @@
+{
+  "protocol_version": "2",
+  "heartbeat_fields": ["protocol_version", "release_id", "sessions"],
+  "ticket_fields": ["attempt_count", "deadline_at", "next_attempt_at", "reason", "session_id", "status", "ticket_id", "writer_epoch"],
+  "claim_fields": ["lease_owner", "lease_seconds", "ticket_id"],
+  "report_fields": ["event", "evidence", "lease_owner", "ticket_id", "writer_epoch"],
+  "states": ["awaiting_guardian", "detected", "claimed", "launching", "recovered", "failed", "cancelled_live"]
+}
