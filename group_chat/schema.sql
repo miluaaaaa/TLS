@@ -1,5 +1,5 @@
 -- Canonical schema is embedded in qyp_multi_registry.py so the CLI can
 -- initialize a fresh database without a migration dependency.
 -- This file is a human-readable marker for deployment reviews.
--- Current executable schema version: 7 (see SCHEMA_VERSION in the Python module).
+-- Current executable schema version: 8 (see SCHEMA_VERSION in the Python module).
 -- See qyp_multi_registry.py:SCHEMA and Registry._migrate_schema().

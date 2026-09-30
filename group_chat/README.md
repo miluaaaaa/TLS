@@ -16,7 +16,7 @@ No operator credentials or running state are included.
 | `qyp_multi_agent.py` | User-side Agent; its Codex bridge modules are included here. |
 
 The executable registry schema is embedded in `qyp_multi_registry.py`
-(`SCHEMA_VERSION = 7`). `schema.sql` is only a human-readable marker. The
+(`SCHEMA_VERSION = 8`). `schema.sql` is only a human-readable marker. The
 transport schema is version 2 and the Agent wire protocol is version 2.
 
 ## Setup
@@ -59,6 +59,22 @@ from the SDK long connection. The group must already be registered.
 The bridge can enroll a sender from that group event, but a session becomes
 accessible only after explicit sharing. `read` shares cannot issue commands.
 Revoking a share removes group access and associated subscriptions.
+
+## Shared work queue
+
+Group members can create tasks with explicit acceptance criteria, claim one
+available task, submit evidence, and release a task for another member. Only
+the task owner can verify evidence and approve completion. Approval records
+one credit for the current submitted claimant; it is attribution metadata,
+not a billing or payment mechanism. A task can have only one open claim, and
+claiming does not grant access to any unshared Codex session.
+
+Session owners may separately enable history search for a group. An ordinary
+session share does not enable it. Searches execute on the owner's Agent and
+return at most five short matches; the raw transcript stays local. Search
+queries and returned snippets are stored in the durable transport database
+and sent to the group, so enable this only for sessions suitable for sharing.
+See the command examples in [DEPLOY.md](DEPLOY.md).
 
 For each command, authorize first and then call `TransportStore.enqueue()`.
 That method performs the atomic message-ID claim; do not claim the same message

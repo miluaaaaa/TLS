@@ -94,6 +94,19 @@ class CompleteReportingTests(unittest.TestCase):
             transcript.flush()
             self.assertEqual(agent._new_completion(Path(transcript.name), 0, "turn-target"), "right reply")
 
+    def test_history_search_returns_bounded_local_matches_and_redacts_tokens(self):
+        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as transcript:
+            for text in ("architecture first", "architecture bearer abcdefghijklmnop", "architecture last"):
+                transcript.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}],
+                }}) + "\n")
+            transcript.flush()
+            answer = agent.search_transcript(Path(transcript.name), "architecture", limit=2)
+        self.assertIn("architecture last", answer)
+        self.assertNotIn("architecture first", answer)
+        self.assertNotIn("abcdefghijklmnop", answer)
+        self.assertIn("[redacted]", answer)
+
     def test_completion_detects_abort_for_the_bound_turn(self):
         with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as transcript:
             transcript.write(
