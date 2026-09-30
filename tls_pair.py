@@ -23,7 +23,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
-DEFAULT_URL = "https://api.xhqcode.com/tls-agent"
+DEFAULT_URL = ""
 DEFAULT_CONFIG = Path.home() / ".config/tls/agent.env"
 FAULT_HEALER_SOURCE = Path(__file__).with_name("tls_fault_healer.py")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}

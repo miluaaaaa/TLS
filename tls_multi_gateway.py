@@ -9,6 +9,7 @@ pairing, heartbeat, command, and result endpoints backed by SQLite.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import secrets
@@ -189,8 +190,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._dispatch_error(error)
 
     def log_message(self, format: str, *args: object) -> None:
-        # Avoid writing credentials or message bodies to the service journal.
-        print(f"tls-agent-gateway {self.address_string()} {format % args}", flush=True)
+        return
 
 
 class GatewayServer(ThreadingHTTPServer):
@@ -207,6 +207,11 @@ def main() -> int:
     parser.add_argument("--host", default=os.environ.get("TLS_AGENT_GATEWAY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("TLS_AGENT_GATEWAY_PORT", "8766")))
     args = parser.parse_args()
+    try:
+        if not ipaddress.ip_address(args.host).is_loopback:
+            parser.error("--host must be a loopback IP; use a TLS reverse proxy for remote access")
+    except ValueError:
+        parser.error("--host must be a loopback IP address")
     store = TransportStore()
     store.init()
     server = GatewayServer((args.host, args.port), store)
