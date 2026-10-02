@@ -59,6 +59,9 @@ from the SDK long connection. The group must already be registered.
 The bridge can enroll a sender from that group event, but a session becomes
 accessible only after explicit sharing. `read` shares cannot issue commands.
 Revoking a share removes group access and associated subscriptions.
+Registering a Session, enrolling its owner, or receiving another group event
+never creates or restores a Session share. Results recheck current access
+both when the Agent completes and before Feishu delivery.
 
 ## Shared work queue
 
@@ -68,6 +71,17 @@ the task owner can verify evidence and approve completion. Approval records
 one credit for the current submitted claimant; it is attribution metadata,
 not a billing or payment mechanism. A task can have only one open claim, and
 claiming does not grant access to any unshared Codex session.
+Use `/help` to see group commands and `/task <task-id>` to inspect acceptance
+criteria, the current claimant, recent evidence, and completion credit.
+Release retries are tied to the original message and claim, so a lost reply
+cannot release a later claimant's work. Malformed management commands return
+usage help rather than becoming instructions to Codex.
+
+New evidence must start unverified. The registry permits verification only
+by an approved task owner or an explicitly authorized reviewer; the Feishu
+`/verify` and `/approve` commands remain owner-only and require a writable
+task share. Accepted progress requires the completed task and its approved
+evidence to remain verified.
 
 Session owners may separately enable history search for a group. An ordinary
 session share does not enable it. Searches execute on the owner's Agent and
@@ -75,6 +89,8 @@ return at most five short matches; the raw transcript stays local. Search
 queries and returned snippets are stored in the durable transport database
 and sent to the group, so enable this only for sessions suitable for sharing.
 See the command examples in [DEPLOY.md](DEPLOY.md).
+The Agent redacts common credential assignments, authorization headers,
+private keys, and token formats before cutting short history snippets.
 
 For each command, authorize first and then call `TransportStore.enqueue()`.
 That method performs the atomic message-ID claim; do not claim the same message

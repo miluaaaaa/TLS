@@ -24,12 +24,31 @@ LOG = logging.getLogger("tls.feishu_group_ingress")
 SESSION_ID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
 EXPLICIT_SESSION = re.compile(r"^/session\s+(\S+)\s+(.+)$", re.I | re.S)
 TASK_CREATE = re.compile(r"^/task\s+([A-Za-z0-9_.:-]{1,160})\s+(\S+)\s+(.+?)\s+\|\s+(.+)$", re.I | re.S)
+TASK_DETAIL = re.compile(r"^/task\s+([A-Za-z0-9_.:-]{1,160})$", re.I)
 TASK_ACTION = re.compile(r"^/(claim|release|approve)\s+([A-Za-z0-9_.:-]{1,160})$", re.I)
 TASK_SUBMIT = re.compile(r"^/submit\s+([A-Za-z0-9_.:-]{1,160})\s+(.+)$", re.I | re.S)
 TASK_VERIFY = re.compile(r"^/verify\s+([A-Za-z0-9_.:-]{1,160})\s+([A-Za-z0-9_.:-]{1,160})$", re.I)
 HISTORY_TOGGLE = re.compile(r"^/history-(on|off)\s+(\S+)$", re.I)
 HISTORY_SEARCH = re.compile(r"^/history\s+(\S+)\s+(.+)$", re.I | re.S)
 MAX_REPLY = 4000
+TEAM_HELP = """TLS 群协作命令（请 @机器人）：
+/tasks — 查看共享任务队列
+/task <任务ID> — 查看验收标准、领取者与提交证据
+/task <任务ID> <Session UUID> <目标> | <验收标准> — 创建任务
+/claim <任务ID> — 领取任务
+/release <任务ID> — 释放任务，供其他成员接手
+/submit <任务ID> <证据或链接> — 提交当前任务
+/verify <任务ID> <证据ID> — 负责人验证证据
+/approve <任务ID> — 负责人验收并记录完成贡献
+/history-on <Session UUID> — 所有者开启历史检索
+/history <Session UUID> <关键词> — 检索已授权的历史片段
+/history-off <Session UUID> — 所有者关闭历史检索
+/session <Session UUID> <指导内容> — 指导指定的已共享会话
+共享会话需要先由所有者或管理员显式授权。"""
+TEAM_VERBS = {
+    "/help", "/tasks", "/task", "/claim", "/release", "/submit", "/verify", "/approve",
+    "/history", "/history-on", "/history-off",
+}
 
 
 class RouteStore:
@@ -139,14 +158,41 @@ def _team_command(event: dict[str, str], transport: TransportStore) -> tuple[str
     text = event["text"]
     selected = registry()
     chat_id, open_id = event["chat_id"], event["open_id"]
+    if text.lower() == "/help":
+        return "team-help", TEAM_HELP
     if text.lower() == "/tasks":
         tasks = selected.task_queue(chat_id, open_id)
         lines = [
             f"{task['task_id']} | {task['name']} | {task['status']} | "
-            f"{task.get('claimant') or 'available'}"
+            f"{task.get('claimant') or (('完成者：' + task['credited_user_id']) if task.get('credited_user_id') else '无人领取')}"
             for task in tasks[:20]
         ]
         return "task-list", "\n".join(lines) if lines else "当前没有共享任务。"
+    match = TASK_DETAIL.fullmatch(text)
+    if match:
+        task = selected.shared_task_details(chat_id, open_id, match.group(1))
+        claim, credit = task["claim"], task["credit"]
+        acceptance = task["contract"].get("acceptance", [])
+        if not isinstance(acceptance, list):
+            acceptance = [acceptance]
+        lines = [
+            f"{task['task_id']} | {task['name']}",
+            f"状态：{task['status']}；负责人：{task['owner']}",
+            f"领取者：{claim['claimant'] if claim else '无人领取'}",
+            "验收标准：" + ("；".join(str(item)[:300] for item in acceptance[:10]) or "尚未设置"),
+        ]
+        if credit:
+            lines.append(f"完成贡献：{credit['finisher']}")
+        if task["evidence"]:
+            lines.append("最近提交证据：")
+            lines.extend(
+                f"{item['evidence_id']} | {item['verification_status']} | "
+                f"{(item['uri'] or item['summary'] or item['title'])[:300]}"
+                for item in task["evidence"]
+            )
+        else:
+            lines.append("尚未提交证据。")
+        return "task-detail", "\n".join(lines)
     match = TASK_CREATE.fullmatch(text)
     if match:
         task_id, session_id, objective, acceptance = match.groups()
@@ -164,11 +210,11 @@ def _team_command(event: dict[str, str], transport: TransportStore) -> tuple[str
             claim = selected.claim_shared_task(chat_id, open_id, task_id)
             return "task-claimed", f"已领取 {task_id}：{claim['claim_id']}"
         if action == "release":
-            selected.release_shared_task(chat_id, open_id, task_id)
+            selected.release_shared_task(chat_id, open_id, task_id, idempotency_key=event["message_id"])
             return "task-released", f"{task_id} 已回到待领取队列。"
-        visible = {task["task_id"] for task in selected.task_queue(chat_id, open_id)}
-        if task_id not in visible:
-            raise AuthorizationDenied("任务未共享到当前群")
+        visible = {task["task_id"]: task["access"] for task in selected.task_queue(chat_id, open_id)}
+        if visible.get(task_id) != "write":
+            raise AuthorizationDenied("任务未以可写方式共享到当前群")
         approved = selected.approve_task(task_id, open_id)
         credit = approved.get("credit")
         return "task-approved", f"{task_id} 已验收。Credit: {credit['user_id'] if credit else '无领取记录'}"
@@ -189,9 +235,9 @@ def _team_command(event: dict[str, str], transport: TransportStore) -> tuple[str
     match = TASK_VERIFY.fullmatch(text)
     if match:
         task_id, evidence_id = match.groups()
-        visible = {task["task_id"] for task in selected.task_queue(chat_id, open_id)}
-        if task_id not in visible:
-            raise AuthorizationDenied("任务未共享到当前群")
+        visible = {task["task_id"]: task["access"] for task in selected.task_queue(chat_id, open_id)}
+        if visible.get(task_id) != "write":
+            raise AuthorizationDenied("任务未以可写方式共享到当前群")
         selected.verify_evidence_as_task_owner(task_id, evidence_id, open_id)
         return "task-verified", f"证据 {evidence_id} 已验证。"
     match = HISTORY_TOGGLE.fullmatch(text)
@@ -208,6 +254,8 @@ def _team_command(event: dict[str, str], transport: TransportStore) -> tuple[str
             session_id=session_id, text=query.strip(), action="history_search", extra={"query": query.strip()},
         )
         return ("duplicate" if queued.get("duplicate") else "queued"), ""
+    if text.split(maxsplit=1)[0].lower() in TEAM_VERBS:
+        raise RegistryError("命令格式不正确，请发送 /help 查看用法。")
     return None
 
 
@@ -232,6 +280,8 @@ def process_message(event: dict[str, str], routes: RouteStore, transport: Transp
         if not SESSION_ID.fullmatch(requested):
             raise RegistryError("invalid session ID")
         session_id = requested.lower()
+    elif text.split(maxsplit=1)[0].lower() == "/session":
+        raise RegistryError("用法：/session <Session UUID> <指导内容>")
     elif reply_target:
         session_id = reply_target
     else:
@@ -275,11 +325,14 @@ def publish_one(client: Any, routes: RouteStore, transport: TransportStore) -> b
     source_id = str(payload["message_id"])
     result = payload.get("result") or {}
     answer = str(result.get("answer") or result.get("text") or payload.get("error") or "Codex completed")
-    if payload.get("request", {}).get("action") == "history_search":
-        try:
-            transport.registry.authorize_history_search(str(payload["open_id"]), str(payload["chat_id"]), str(payload["session_id"]))
-        except RegistryError:
-            answer = "历史检索授权已撤销，结果未发送。"
+    action = str(payload.get("request", {}).get("action", ""))
+    try:
+        transport.authorize_result(
+            str(payload["open_id"]), str(payload["chat_id"]), str(payload["session_id"]),
+            action=action, task_id=str(payload.get("task_id", "")),
+        )
+    except RegistryError:
+        answer = "历史检索授权已撤销，结果未发送。" if action == "history_search" else "会话或任务授权已撤销，结果未发送。"
     try:
         reply_id = send_reply(client, source_id, answer, "agent-event:" + str(claimed["event_id"]))
         routes.bind(source_id, reply_id, str(payload["chat_id"]), str(payload["session_id"]))

@@ -60,6 +60,47 @@ class MultiUserRegistryTests(unittest.TestCase):
         with self.assertRaises(AuthorizationDenied):
             self.registry.authorize("ou_other", "oc_test", SESSION_B, "read")
 
+    def test_registration_and_membership_never_grant_or_restore_a_share(self) -> None:
+        # Include a legacy group-eligible Session: its flag is not consent.
+        self.registry.add_session("inst-owner", SESSION_C, share_with_groups=True)
+        for enroll in (self.registry.add_group_member, self.registry.ensure_group_member):
+            with self.subTest(enroll=enroll.__name__):
+                enroll("group-test", "ou_owner")
+                with self.assertRaises(AuthorizationDenied):
+                    self.registry.authorize("ou_member", "oc_test", SESSION_C, "read")
+        self.registry.share_session("group-test", SESSION_C)
+        self.assertTrue(self.registry.authorize("ou_member", "oc_test", SESSION_C)["allowed"])
+        self.registry.unshare_session("group-test", SESSION_C)
+        self.registry.ensure_group_member("group-test", "ou_owner")
+        self.registry.add_group_member("group-test", "ou_owner")
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.authorize("ou_member", "oc_test", SESSION_C, "read")
+
+    def test_joining_with_existing_sessions_requires_an_explicit_share(self) -> None:
+        self.registry.create_group("Other team", "ou_member", group_id="group-other", feishu_chat_id="oc_other")
+        self.registry.add_session("inst-owner", SESSION_C, share_with_groups=True)
+        self.registry.add_group_member("group-other", "ou_owner")
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.authorize("ou_member", "oc_other", SESSION_C, "read")
+        self.registry.share_session("group-other", SESSION_C, access="read")
+        self.assertTrue(self.registry.authorize("ou_member", "oc_other", SESSION_C, "read")["allowed"])
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.authorize("ou_member", "oc_other", SESSION_C, "write")
+
+    def test_upgrade_preserves_existing_access_but_does_not_restore_revocation(self) -> None:
+        self.registry.share_session("group-test", SESSION_A, access="read")
+        with self.registry._connect() as db:
+            db.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
+            db.execute("UPDATE sessions SET private_only=0 WHERE session_id=?", (SESSION_A,))
+        self.registry.init()
+        self.assertTrue(self.registry.authorize("ou_member", "oc_test", SESSION_A, "read")["allowed"])
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.authorize("ou_member", "oc_test", SESSION_A, "write")
+        self.registry.unshare_session("group-test", SESSION_A)
+        self.registry.ensure_group_member("group-test", "ou_owner")
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.authorize("ou_member", "oc_test", SESSION_A, "read")
+
     def test_read_share_cannot_write(self) -> None:
         self.registry.share_session("group-test", SESSION_A, access="read")
         self.assertTrue(self.registry.authorize("ou_member", "oc_test", SESSION_A, "read")["allowed"])
@@ -363,23 +404,27 @@ class MultiUserRegistryTests(unittest.TestCase):
         verified = self.registry.task_progress("task-evidence-progress", session_id=SESSION_A)
         self.assertEqual((verified["percent"], verified["state"]), (90, "等待确认"))
 
-        self.registry.append_task_event(
-            "task-evidence-progress",
-            "task.approved",
-            {"evidence_id": evidence["evidence_id"]},
-            session_id=SESSION_A,
-            actor_open_id="ou_member",
-        )
+        for actor in ("ou_member", "ou_owner"):
+            with self.subTest(actor=actor), self.assertRaises(RegistryError):
+                self.registry.append_task_event(
+                    "task-evidence-progress", "task.approved", {"evidence_id": evidence["evidence_id"]},
+                    session_id=SESSION_A, actor_open_id=actor,
+                )
+        for idem in ("queue-release:example", "task:task-evidence-progress:approved:all"):
+            with self.subTest(idem=idem), self.assertRaises(RegistryError):
+                self.registry.append_task_event(
+                    "task-evidence-progress", "task.started", {}, idempotency_key=idem,
+                )
+        # A forged event already in an older database must not mean acceptance.
+        with self.registry._connect() as db:
+            db.execute(
+                "INSERT INTO task_events(task_id, session_id, event_type, actor_open_id, payload_json, created_at) "
+                "VALUES(?, ?, 'task.approved', 'ou_owner', '{}', 1)",
+                ("task-evidence-progress", SESSION_A),
+            )
         unauthorized = self.registry.task_progress("task-evidence-progress", session_id=SESSION_A)
         self.assertEqual((unauthorized["percent"], unauthorized["approved"]), (90, False))
-
-        self.registry.append_task_event(
-            "task-evidence-progress",
-            "task.approved",
-            {"evidence_id": evidence["evidence_id"]},
-            session_id=SESSION_A,
-            actor_open_id="ou_owner",
-        )
+        self.registry.approve_task("task-evidence-progress", "ou_owner", session_id=SESSION_A)
         approved = self.registry.task_progress("task-evidence-progress", session_id=SESSION_A)
         self.assertEqual((approved["percent"], approved["state"], approved["approved"]), (100, "已验收", True))
 

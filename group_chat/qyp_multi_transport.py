@@ -1311,6 +1311,18 @@ class TransportStore:
                 raise TransportError("找不到 command")
             return dict(updated)
 
+    def authorize_result(
+        self, open_id: str, chat_id: str, session_id: str, *, action: str = "", task_id: str = "",
+    ) -> None:
+        """Recheck current read access at completion and before delivery."""
+
+        if action == "history_search":
+            self.registry.authorize_history_search(open_id, chat_id, session_id)
+        elif task_id:
+            self.registry.authorize_task(open_id, chat_id, task_id, session_id, "read")
+        else:
+            self.registry.authorize(open_id, chat_id, session_id, "read")
+
     def complete(
         self,
         token: str,
@@ -1351,14 +1363,16 @@ class TransportStore:
             )):
                 connection.rollback()
                 raise TransportError("command lease lost")
-            if row["action"] == "history_search" and status == "completed":
-                try:
-                    self.registry.authorize_history_search(str(row["open_id"]), str(row["chat_id"]), str(row["session_id"]))
-                except RegistryError:
-                    status = "failed"
-                    error = "history-authorization-revoked"
-                    result_value = {}
-                    result_json = "{}"
+            try:
+                self.authorize_result(
+                    str(row["open_id"]), str(row["chat_id"]), str(row["session_id"]),
+                    action=str(row["action"]), task_id=str(row["task_id"] or ""),
+                )
+            except RegistryError:
+                status = "failed"
+                error = "history-authorization-revoked" if row["action"] == "history_search" else "result-authorization-revoked"
+                result_value = {}
+                result_json = "{}"
             connection.execute(
                 "UPDATE agent_commands SET status = ?, lease_until = 0, updated_at = ?, result_json = ?, last_error = ?, "
                 "transcript_proof = ?, turn_id = ? "
