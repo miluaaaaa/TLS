@@ -15,10 +15,18 @@ real session/message IDs, transcripts, or repair records. The group-chat
 history in this repository is redacted; the raw development log remains
 private. Feishu group membership alone never grants a Codex session: an
 operator must explicitly share it, and write access is separate from read.
+Registration and enrollment never create new shares or undo revocation.
+Completion and delivery recheck current read permissions; a revoked Session,
+task share, or history-search opt-in suppresses the result. This does not
+erase results already retained in the transport database or sent to Feishu.
 History search also requires a separate opt-in by the Session owner. Search
 queries and short result snippets are retained in the Agent transport database
 and visible to the group; never enable it for a Session containing material
 that should remain private from every member of that group.
+Common credentials are redacted from history text before snippets are cut,
+including password/token assignments, Basic/Bearer/Token headers, private-key
+blocks, and common API/GitHub token formats. Redaction does not make an
+otherwise private Session suitable for sharing.
 
 Report security issues privately to the repository owner through GitHub's
 private vulnerability reporting mechanism rather than opening a public issue

@@ -112,6 +112,7 @@ class TeamModelTests(unittest.TestCase):
             created_by="ou_builder",
         )
         self.assertEqual(evidence["verification_status"], "unverified")
+        self.registry.grant_role("ou_tester", "reviewer", scope_type="task", scope_id="task-model", granted_by="ou_owner")
         verified = self.registry.verify_evidence(evidence["evidence_id"], "ou_tester")
         self.assertEqual(verified["verification_status"], "verified")
         self.assertEqual(verified["verifier_open_id"], "ou_tester")
@@ -134,6 +135,57 @@ class TeamModelTests(unittest.TestCase):
         accepted = self.registry.accept_handoff("handoff-builder-tester", "ou_tester")
         self.assertEqual(accepted["status"], "accepted")
         self.assertEqual(accepted["accepted_by"], "ou_tester")
+
+    def test_evidence_verification_requires_approved_owner_or_scoped_reviewer(self) -> None:
+        evidence = self.registry.record_evidence("task-model", "test", "Result", created_by="ou_builder")
+        for actor in ("ou_builder", "ou_tester"):
+            with self.subTest(actor=actor), self.assertRaises(AuthorizationDenied):
+                self.registry.verify_evidence(evidence["evidence_id"], actor)
+        self.registry.create_task("ou_owner", "Other task", {"objective": "other"}, task_id="task-other")
+        self.registry.grant_role("ou_tester", "reviewer", scope_type="task", scope_id="task-other", granted_by="ou_owner")
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.verify_evidence(evidence["evidence_id"], "ou_tester")
+        self.assertEqual(self.registry.list_evidence("task-model")[0]["verification_status"], "unverified")
+        self.registry.grant_role("ou_tester", "reviewer", scope_type="task", scope_id="task-model", granted_by="ou_owner")
+        self.assertEqual(self.registry.verify_evidence(evidence["evidence_id"], "ou_tester")["verification_status"], "verified")
+        self.registry.set_user_status("ou_tester", "disabled")
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.verify_evidence(evidence["evidence_id"], "ou_tester", status="rejected")
+        self.assertEqual(self.registry.verify_evidence(evidence["evidence_id"], "ou_owner")["verification_status"], "verified")
+
+    def test_evidence_cannot_arrive_preverified_or_bypass_disabled_owner(self) -> None:
+        with self.assertRaises(RegistryError):
+            self.registry.record_evidence("task-model", "test", "Preverified", verification_status="verified", created_by="ou_builder")
+        evidence = self.registry.record_evidence("task-model", "test", "Result", created_by="ou_builder")
+        self.registry.verify_evidence(evidence["evidence_id"], "ou_owner")
+        self.registry.set_user_status("ou_owner", "disabled")
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.verify_evidence(evidence["evidence_id"], "ou_owner")
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.approve_task("task-model", "ou_owner")
+        self.assertEqual(self.registry.task_progress("task-model")["percent"], 90)
+
+    def test_cancelled_task_cannot_be_approved(self) -> None:
+        evidence = self.registry.record_evidence("task-model", "test", "Result", created_by="ou_builder")
+        self.registry.verify_evidence(evidence["evidence_id"], "ou_owner")
+        self.registry.update_task("task-model", status="cancelled")
+        with self.assertRaises(RegistryError):
+            self.registry.approve_task("task-model", "ou_owner")
+        self.assertEqual(self.registry.task_progress("task-model")["state"], "任务异常")
+
+    def test_rejecting_accepted_evidence_removes_accepted_progress(self) -> None:
+        first = self.registry.record_evidence("task-model", "test", "Older result", created_by="ou_builder")
+        accepted = self.registry.record_evidence("task-model", "test", "Latest result", created_by="ou_builder")
+        self.registry.verify_evidence(first["evidence_id"], "ou_owner")
+        self.registry.verify_evidence(accepted["evidence_id"], "ou_owner")
+        approval = self.registry.approve_task("task-model", "ou_owner")
+        chosen = approval["approval_event"]["payload"]["evidence_id"]
+        self.registry.verify_evidence(chosen, "ou_owner", status="rejected")
+        progress = self.registry.task_progress("task-model")
+        self.assertEqual((progress["percent"], progress["approved"]), (90, False))
+        for item in self.registry.list_evidence("task-model", verification_status="verified"):
+            self.registry.verify_evidence(item["evidence_id"], "ou_owner", status="rejected")
+        self.assertEqual(self.registry.task_progress("task-model")["percent"], 75)
 
     def test_agent_channel_is_task_scoped_ordered_and_idempotent(self) -> None:
         self.registry.add_installation(

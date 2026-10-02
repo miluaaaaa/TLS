@@ -805,39 +805,6 @@ class Registry:
             raise RegistryError(f"找不到群组: {reference}")
         return row
 
-    def _share_user_sessions_with_group(
-        self,
-        connection: sqlite3.Connection,
-        group_id: str,
-        user_id: str,
-        timestamp: int,
-    ) -> None:
-        """Make a member's existing Sessions available in their new group."""
-
-        connection.execute(
-            "INSERT OR IGNORE INTO session_shares(group_id, session_id, access, created_at) "
-            "SELECT ?, s.session_id, 'write', ? FROM sessions s "
-            "JOIN installations i ON i.installation_id = s.installation_id "
-            "WHERE i.user_id = ? AND s.private_only = 0",
-            (group_id, timestamp, user_id),
-        )
-
-    def _share_session_with_member_groups(
-        self,
-        connection: sqlite3.Connection,
-        session_id: str,
-        owner_user_id: str,
-        timestamp: int,
-    ) -> None:
-        """Make a newly registered Session available in all owner groups."""
-
-        connection.execute(
-            "INSERT OR IGNORE INTO session_shares(group_id, session_id, access, created_at) "
-            "SELECT gm.group_id, ?, 'write', ? FROM group_members gm "
-            "WHERE gm.user_id = ?",
-            (session_id, timestamp, owner_user_id),
-        )
-
     def add_user(
         self,
         feishu_open_id: str,
@@ -945,10 +912,16 @@ class Registry:
         *,
         workspace: str = "",
         status: str = "unknown",
-        share_with_groups: bool = True,
+        share_with_groups: bool = False,
         model: str = "unknown",
         effort: str = "unknown",
     ) -> dict[str, Any]:
+        """Register locally; group access always requires an explicit share.
+
+        ``share_with_groups`` retains the legacy private_only storage flag for
+        callers, but neither value grants access to any group.
+        """
+
         iid = _identifier(installation_id, "installation_id")
         sid = _text(session_id, "session_id", 80).lower()
         if not SESSION_ID.fullmatch(sid):
@@ -975,13 +948,6 @@ class Registry:
                 )
             except sqlite3.IntegrityError as exc:
                 raise RegistryError("session_id 已登记") from exc
-            if share_with_groups:
-                self._share_session_with_member_groups(
-                    connection,
-                    sid,
-                    str(installation["user_id"]),
-                    timestamp,
-                )
             return dict(connection.execute("SELECT * FROM sessions WHERE session_id = ?", (sid,)).fetchone())
 
     def update_session(self, session_id: str, *, label: str | None = None, status: str | None = None, workspace: str | None = None, model: str | None = None, effort: str | None = None) -> dict[str, Any]:
@@ -1912,6 +1878,8 @@ class Registry:
         verification = _text(verification_status, "verification_status")
         if verification not in EVIDENCE_STATUS_VALUES:
             raise RegistryError(f"verification_status 必须是 {sorted(EVIDENCE_STATUS_VALUES)} 之一")
+        if verification != "unverified":
+            raise RegistryError("新证据必须未经验证；请使用 verify_evidence 核验")
         timestamp = now()
         with self._connect() as connection:
             self._task_row(connection, tid)
@@ -1984,8 +1952,12 @@ class Registry:
         if verification not in EVIDENCE_STATUS_VALUES:
             raise RegistryError(f"verification_status 必须是 {sorted(EVIDENCE_STATUS_VALUES)} 之一")
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             evidence = self._evidence_row(connection, evidence_id)
-            verifier = self._user_row(connection, verifier_reference)
+            task = self._task_row(connection, str(evidence["task_id"]))
+            verifier, capabilities = self._channel_actor(connection, str(evidence["task_id"]), verifier_reference)
+            if verifier["user_id"] != task["owner_user_id"] and "evidence.verify" not in capabilities:
+                raise AuthorizationDenied("只有任务负责人或获授权的审核者可以验证证据")
             verified_at = now() if verification in {"verified", "rejected"} else None
             connection.execute(
                 "UPDATE evidence SET verification_status = ?, verifier_open_id = ?, verified_at = ? "
@@ -2039,8 +2011,10 @@ class Registry:
             connection.execute("BEGIN IMMEDIATE")
             task = self._task_row(connection, tid)
             owner = self._user_row(connection, owner_reference)
-            if str(task["owner_user_id"]) != str(owner["user_id"]):
+            if owner["status"] != "approved" or str(task["owner_user_id"]) != str(owner["user_id"]):
                 raise AuthorizationDenied("只有任务负责人可以确认验收")
+            if task["status"] in {"failed", "cancelled"}:
+                raise RegistryError("失败或取消的任务不能直接验收")
             previous_credit = connection.execute(
                 "SELECT * FROM task_credits WHERE task_id=?", (tid,),
             ).fetchone()
@@ -2133,7 +2107,7 @@ class Registry:
         """Derive a conservative, evidence-backed task progress snapshot.
 
         A terminal response is not completion evidence.  One verified evidence
-        item caps a task at 90%; the task owner must append ``task.approved``
+        item caps a task at 90%; the task owner must call ``approve_task``
         before the card can show 100%.
         """
 
@@ -2154,7 +2128,7 @@ class Registry:
                 clauses.append("(session_id = ? OR session_id IS NULL)")
                 parameters.append(sid)
             events = _rows(connection.execute(
-                "SELECT event_type, actor_open_id FROM task_events WHERE " + " AND ".join(clauses),
+                "SELECT event_type, actor_open_id, payload_json FROM task_events WHERE " + " AND ".join(clauses),
                 parameters,
             ))
             evidence_clauses = ["task_id = ?"]
@@ -2163,13 +2137,14 @@ class Registry:
                 evidence_clauses.append("(session_id = ? OR session_id IS NULL)")
                 evidence_parameters.append(sid)
             evidence = _rows(connection.execute(
-                "SELECT verification_status FROM evidence WHERE " + " AND ".join(evidence_clauses),
+                "SELECT evidence_id, verification_status FROM evidence WHERE " + " AND ".join(evidence_clauses),
                 evidence_parameters,
             ))
 
         event_types = {str(event["event_type"]).casefold() for event in events}
         evidence_count = len(evidence)
-        verified_count = sum(item["verification_status"] == "verified" for item in evidence)
+        verified_ids = {item["evidence_id"] for item in evidence if item["verification_status"] == "verified"}
+        verified_count = len(verified_ids)
         percent = 10
         for event_type, weight in TASK_PROGRESS_EVENT_WEIGHTS.items():
             if event_type in event_types:
@@ -2178,11 +2153,14 @@ class Registry:
             percent = max(percent, 75)
         if verified_count:
             percent = max(percent, 90)
+        else:
+            percent = min(percent, 75)
 
         owner_open_id = str(owner["feishu_open_id"] if owner else "")
-        approved = any(
+        approved = task["status"] == "completed" and any(
             str(event["event_type"]).casefold() == "task.approved"
             and str(event["actor_open_id"]) == owner_open_id
+            and json.loads(event["payload_json"]).get("evidence_id") in verified_ids
             for event in events
         )
         completed_claim = bool({"command.completed", "task.completed"} & event_types)
@@ -2676,6 +2654,30 @@ class Registry:
             )
             return [self._task_dict(row) for row in rows]
 
+    def shared_task_details(self, chat_id: str, open_id: str, task_id: str) -> dict[str, Any]:
+        tid = _identifier(task_id, "task_id")
+        with self._connect() as connection:
+            _, _, task = self._shared_task_context(connection, chat_id, open_id, tid, write=False)
+            owner = self._user_row(connection, str(task["owner_user_id"]))
+            claim = connection.execute(
+                "SELECT c.*, u.display_name AS claimant FROM task_queue_claims c "
+                "JOIN users u ON u.user_id=c.user_id "
+                "WHERE c.task_id=? AND c.status IN ('active','submitted')", (tid,),
+            ).fetchone()
+            credit = connection.execute(
+                "SELECT cr.*, u.display_name AS finisher FROM task_credits cr "
+                "JOIN users u ON u.user_id=cr.user_id WHERE cr.task_id=?", (tid,),
+            ).fetchone()
+            evidence = _rows(connection.execute(
+                "SELECT evidence_id, verification_status, title, uri, summary FROM evidence "
+                "WHERE task_id=? ORDER BY created_at DESC, evidence_id DESC LIMIT 5", (tid,),
+            ))
+            return {
+                **self._task_dict(task), "owner": str(owner["display_name"]),
+                "claim": dict(claim) if claim else None,
+                "credit": dict(credit) if credit else None, "evidence": evidence,
+            }
+
     def claim_shared_task(self, chat_id: str, open_id: str, task_id: str) -> dict[str, Any]:
         tid = _identifier(task_id, "task_id")
         timestamp = now()
@@ -2706,11 +2708,28 @@ class Registry:
             connection.commit()
             return dict(connection.execute("SELECT * FROM task_queue_claims WHERE claim_id = ?", (claim_id,)).fetchone())
 
-    def release_shared_task(self, chat_id: str, open_id: str, task_id: str) -> dict[str, Any]:
+    def release_shared_task(
+        self, chat_id: str, open_id: str, task_id: str, *, idempotency_key: str,
+    ) -> dict[str, Any]:
         tid = _identifier(task_id, "task_id")
+        idem = "queue-release:" + hashlib.sha256(
+            _text(idempotency_key, "idempotency_key", 160).encode()
+        ).hexdigest()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            _, user, task = self._shared_task_context(connection, chat_id, open_id, tid)
+            group, user, task = self._shared_task_context(connection, chat_id, open_id, tid)
+            previous = connection.execute(
+                "SELECT * FROM task_events WHERE task_id=? AND idempotency_key=?", (tid, idem),
+            ).fetchone()
+            if previous is not None:
+                if previous["event_type"] != "task.claim.released":
+                    raise RegistryError("释放消息与已记录事件冲突")
+                payload = json.loads(previous["payload_json"])
+                if previous["actor_open_id"] != open_id or payload.get("group_id") != group["group_id"]:
+                    raise AuthorizationDenied("释放消息不属于当前用户和群组")
+                return dict(connection.execute(
+                    "SELECT * FROM task_queue_claims WHERE claim_id=?", (payload["claim_id"],),
+                ).fetchone())
             current = connection.execute(
                 "SELECT * FROM task_queue_claims WHERE task_id = ? AND status IN ('active','submitted')",
                 (tid,),
@@ -2725,6 +2744,11 @@ class Registry:
                 (timestamp, current["claim_id"]),
             )
             connection.execute("UPDATE tasks SET status='planned', updated_at=? WHERE task_id=?", (timestamp, tid))
+            self._append_task_event_in_connection(
+                connection, tid, "task.claim.released",
+                {"claim_id": str(current["claim_id"]), "group_id": str(group["group_id"])},
+                session_id=None, actor_open_id=open_id, idempotency_key=idem, timestamp=timestamp,
+            )
             self._audit(connection, open_id, "release_shared_task", "task", tid, str(current["claim_id"]))
             connection.commit()
             return dict(connection.execute("SELECT * FROM task_queue_claims WHERE claim_id=?", (current["claim_id"],)).fetchone())
@@ -2941,7 +2965,11 @@ class Registry:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         tid = _identifier(task_id, "task_id")
+        if event_type.strip().casefold() in {"task.approved", "task.claim.released"}:
+            raise RegistryError("状态事件必须由对应的验收或释放操作生成")
         idem = None if idempotency_key is None else _text(idempotency_key, "idempotency_key", 160)
+        if idem and (idem.startswith("queue-release:") or idem.startswith(f"task:{tid}:approved:")):
+            raise RegistryError("该幂等键保留给验收和释放操作")
         timestamp = now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -3198,12 +3226,6 @@ class Registry:
                 "ON CONFLICT(group_id, user_id) DO UPDATE SET role = excluded.role",
                 (group["group_id"], user["user_id"], role, timestamp),
             )
-            self._share_user_sessions_with_group(
-                connection,
-                str(group["group_id"]),
-                str(user["user_id"]),
-                timestamp,
-            )
             return dict(connection.execute(
                 "SELECT gm.group_id, gm.user_id, gm.role, u.feishu_open_id, u.display_name "
                 "FROM group_members gm JOIN users u ON u.user_id = gm.user_id "
@@ -3252,12 +3274,6 @@ class Registry:
                 "INSERT INTO group_members(group_id, user_id, role, created_at) VALUES (?, ?, 'member', ?) "
                 "ON CONFLICT(group_id, user_id) DO NOTHING",
                 (group["group_id"], user["user_id"], timestamp),
-            )
-            self._share_user_sessions_with_group(
-                connection,
-                str(group["group_id"]),
-                str(user["user_id"]),
-                timestamp,
             )
             return dict(connection.execute(
                 "SELECT gm.group_id, gm.user_id, gm.role, u.feishu_open_id, u.display_name "

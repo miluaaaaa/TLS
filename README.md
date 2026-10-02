@@ -5,8 +5,9 @@ The repository contains a legacy single-user pairing protocol and a newer
 [group-chat implementation](group_chat/README.md). The group-chat source now
 includes the Feishu long-connection consumer, durable reply bindings, and
 local Codex bridge. It also supports shared task claims, evidence-based
-approval, and owner-enabled session history search. Follow the
-[deployment guide](group_chat/DEPLOY.md).
+approval, group help and task details, and owner-enabled session history
+search. Follow the [deployment guide](group_chat/DEPLOY.md) and check the
+[implemented scope and remaining work](group_chat/STATUS.md).
 
 ## Group chat
 

@@ -62,7 +62,7 @@ class TeamQueueTests(unittest.TestCase):
     def test_release_then_new_finisher_gets_credit(self) -> None:
         self.registry.claim_shared_task("oc_team", "ou_one", "task-ship")
         old = self.registry.record_evidence("task-ship", "test", "Old run", created_by="ou_one")
-        self.registry.release_shared_task("oc_team", "ou_one", "task-ship")
+        self.registry.release_shared_task("oc_team", "ou_one", "task-ship", idempotency_key="om_release_old")
         with self.assertRaises(AuthorizationDenied):
             self.registry.submit_shared_task("oc_team", "ou_one", "task-ship", old["evidence_id"])
         self.registry.claim_shared_task("oc_team", "ou_two", "task-ship")
@@ -89,6 +89,39 @@ class TeamQueueTests(unittest.TestCase):
         self.registry.create_group_task("team", "ou_owner", SESSION, "No criteria", {"objective": "x"}, task_id="task-empty")
         with self.assertRaises(RegistryError):
             self.registry.claim_shared_task("oc_team", "ou_one", "task-empty")
+
+    def test_release_retry_does_not_release_a_new_claim(self) -> None:
+        old = self.registry.claim_shared_task("oc_team", "ou_one", "task-ship")
+        released = self.registry.release_shared_task("oc_team", "ou_owner", "task-ship", idempotency_key="om_release")
+        self.assertEqual(released["claim_id"], old["claim_id"])
+        self.assertEqual(self.registry.release_shared_task("oc_team", "ou_owner", "task-ship", idempotency_key="om_release"), released)
+        current = self.registry.claim_shared_task("oc_team", "ou_two", "task-ship")
+        self.assertEqual(self.registry.release_shared_task("oc_team", "ou_owner", "task-ship", idempotency_key="om_release"), released)
+        self.assertEqual(self.registry.current_shared_task_claim("oc_team", "ou_two", "task-ship"), current)
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.release_shared_task("oc_team", "ou_two", "task-ship", idempotency_key="om_release")
+
+    def test_release_requires_a_stable_nonempty_message_key(self) -> None:
+        claim = self.registry.claim_shared_task("oc_team", "ou_one", "task-ship")
+        for key in (None, "", " "):
+            with self.subTest(key=key), self.assertRaises(RegistryError):
+                self.registry.release_shared_task("oc_team", "ou_owner", "task-ship", idempotency_key=key)
+        self.assertEqual(self.registry.current_shared_task_claim("oc_team", "ou_one", "task-ship"), claim)
+
+    def test_task_details_require_membership_and_expose_current_evidence(self) -> None:
+        self.registry.claim_shared_task("oc_team", "ou_one", "task-ship")
+        evidence = self.registry.record_evidence("task-ship", "test", "Passed", created_by="ou_one", uri="commit:example")
+        self.registry.submit_shared_task("oc_team", "ou_one", "task-ship", evidence["evidence_id"])
+        self.registry.share_task("team", "task-ship", access="read")
+        details = self.registry.shared_task_details("oc_team", "ou_two", "task-ship")
+        self.assertEqual(details["contract"]["acceptance"], ["Tests pass", "Owner reviews result"])
+        self.assertEqual(details["claim"]["user_id"], "one")
+        self.assertEqual(details["evidence"][0]["uri"], "commit:example")
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.shared_task_details("oc_team", "ou_outside", "task-ship")
+        self.registry.unshare_task("team", "task-ship")
+        with self.assertRaises(AuthorizationDenied):
+            self.registry.shared_task_details("oc_team", "ou_one", "task-ship")
 
     def test_history_search_requires_owner_opt_in_and_share(self) -> None:
         self.registry.share_session("team", SESSION, access="read")

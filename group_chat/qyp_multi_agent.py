@@ -3,7 +3,8 @@
 
 The agent makes outbound HTTPS requests only.  It discovers local sessions,
 executes commands through the existing local TLS delivery helpers, and sends
-back a short result.  No transcript or local socket is uploaded.
+back a short result. No raw transcript or local socket is uploaded; opt-in
+history searches return bounded, redacted snippets.
 """
 
 from __future__ import annotations
@@ -703,10 +704,29 @@ def transcript_snapshot(transcript: Path, limit: int = 3) -> str:
     return "最近 3 条消息：\n" + "\n".join(entries[-limit:]) if entries else "该会话尚无可读取消息。"
 
 
+def redact_history_text(text: str) -> str:
+    # Redact complete messages before slicing, so a snippet cannot start in
+    # the middle of a password, authorization header, or private key.
+    text = re.sub(
+        r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----.*?(?:-----END(?: [A-Z0-9]+)* PRIVATE KEY-----|\Z)",
+        "[redacted]", text, flags=re.I | re.S,
+    )
+    text = re.sub(
+        r'''(?i)(\b(?:[a-z0-9]+[_-])*(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|credential)\b["']?\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)''',
+        r"\1[redacted]", text,
+    )
+    text = re.sub(r"(?i)(?:\b(?:bearer|basic)\s+|\bauthorization\s*:\s*token\s+)[^\s,;]+", "[redacted]", text)
+    text = re.sub(r"\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_.-]{8,}", "[redacted]", text)
+    text = re.sub(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", "[redacted]", text)
+    return re.sub(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", text)
+
+
 def search_transcript(transcript: Path, query: str, *, limit: int = 5) -> str:
     term = " ".join(str(query).split()).strip()
     if len(term) < 2 or len(term) > 80:
         raise AgentError("history-query-length-invalid")
+    if not 1 <= limit <= 5:
+        raise AgentError("history-result-limit-invalid")
     matches: deque[str] = deque(maxlen=limit)
     scanned = 0
     truncated = False
@@ -726,13 +746,12 @@ def search_transcript(transcript: Path, query: str, *, limit: int = 5) -> str:
                 payload = record.get("payload") if isinstance(record, dict) else None
                 if not isinstance(payload, dict) or record.get("type") != "response_item" or payload.get("role") not in {"user", "assistant"}:
                     continue
-                content = " ".join(message_text(payload).split())
+                content = " ".join(redact_history_text(message_text(payload)).split())
                 offset = content.casefold().find(term.casefold())
                 if offset < 0:
                     continue
                 start = max(0, offset - 90)
                 snippet = content[start : start + 240]
-                snippet = re.sub(r"(?i)(bearer\s+|api[_-]?key\s*[=:]\s*|sk-)[A-Za-z0-9_.-]{8,}", "[redacted]", snippet)
                 matches.append(f"{'用户' if payload['role'] == 'user' else 'Codex'}：{snippet}")
     except OSError as exc:
         raise AgentError("history-read-failed") from exc

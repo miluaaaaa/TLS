@@ -109,6 +109,30 @@ python3 group_chat/session_policy.py validate
 
 Run the Agent as the same OS user as Codex.
 
+## Upgrade an existing registry
+
+Session registration and member enrollment no longer create automatic
+group shares. The legacy `share_with_groups` argument only preserves its
+storage flag; use `share-session` or the explicit import API to grant access.
+Existing shares remain intact because old databases do not distinguish
+automatic shares from intentional ones. Review each group's dashboard and
+revoke any unwanted share before serving new events:
+
+```bash
+.venv/bin/python group_chat/qyp_multi_registry.py --db "$QYP_TLS_MULTI_DB" \
+  dashboard --group team --user owner
+.venv/bin/python group_chat/qyp_multi_registry.py --db "$QYP_TLS_MULTI_DB" \
+  unshare-session --group team --session '<SESSION_UUID_TO_REVOKE>'
+```
+
+New evidence must be recorded as unverified, then verified by the task owner
+or a reviewer explicitly granted the `evidence.verify` capability for that
+task or globally. Generic `emit-event` cannot manufacture approval or release
+events; use the corresponding task operations.
+Registry callers must pass a stable, nonempty `idempotency_key` to
+`release_shared_task` and reuse it on retries. The Feishu ingress uses the
+original message ID automatically.
+
 ## Team workflow
 
 These commands are sent in the registered group while mentioning the bot.
@@ -117,8 +141,10 @@ criterion after `|`; a member can then claim it. Credit is recorded only
 after the owner verifies the submitted evidence and approves the task.
 
 ```text
+@bot /help
 @bot /task task-demo 019ffaf4-eccd-7203-b5b4-51d967ec128b Ship feature | Tests pass
 @bot /tasks
+@bot /task task-demo
 @bot /claim task-demo
 @bot /submit task-demo commit:abc123
 @bot /verify task-demo evidence-<id>
@@ -132,6 +158,10 @@ team attribution metadata, not money, billing, or model usage accounting.
 The owner may release a stale claim; the current claimant may also release
 their own claim. Group membership and task write access are checked for each
 change.
+`/task <task-id>` shows acceptance criteria, claimant, up to five recent
+evidence items, and completion credit. Both verification and approval need
+a writable task share. A repeated release message acknowledges its original
+claim and cannot release a new claimant after a Feishu send failure.
 
 The Session owner can separately opt a shared Session into history search:
 

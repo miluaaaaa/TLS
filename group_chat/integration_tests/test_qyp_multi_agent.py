@@ -107,6 +107,35 @@ class CompleteReportingTests(unittest.TestCase):
         self.assertNotIn("abcdefghijklmnop", answer)
         self.assertIn("[redacted]", answer)
 
+    def test_history_redacts_credentials_before_snippet_slicing(self):
+        private_material = "example-private-material"
+        examples = (
+            ("architecture password=example-password", "example-password"),
+            ('architecture {"api_key": "example-api-value"}', "example-api-value"),
+            ("architecture TLS_AGENT_TOKEN='example token with spaces'", "example token with spaces"),
+            ("architecture Authorization: Basic ZXhhbXBsZTpleGFtcGxl", "ZXhhbXBsZTpleGFtcGxl"),
+            ("architecture Authorization: Token example-token-value", "example-token-value"),
+            ("architecture https://user:example-password@agent.example.org", "example-password"),
+            ("architecture " + "ghp_" + "example" * 5, "example" * 5),
+            ("password=" + "sensitive" * 50 + " architecture", "sensitive"),
+            ("architecture -----BEGIN PRIVATE KEY-----\n" + private_material + "\n-----END PRIVATE KEY-----", private_material),
+        )
+        for text, secret in examples:
+            with self.subTest(text=text), tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as transcript:
+                transcript.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}],
+                }}) + "\n")
+                transcript.flush()
+                answer = agent.search_transcript(Path(transcript.name), "architecture")
+                self.assertIn("architecture", answer)
+                self.assertIn("[redacted]", answer)
+                self.assertNotIn(secret, answer)
+
+    def test_history_search_never_returns_more_than_five_matches(self):
+        for limit in (0, 6):
+            with self.subTest(limit=limit), self.assertRaisesRegex(agent.AgentError, "result-limit"):
+                agent.search_transcript(Path("unused"), "architecture", limit=limit)
+
     def test_completion_detects_abort_for_the_bound_turn(self):
         with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as transcript:
             transcript.write(

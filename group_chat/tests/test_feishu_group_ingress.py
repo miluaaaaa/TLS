@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from feishu_group_ingress import RouteStore, parse_message, process_message, publish_one, send_reply
-from qyp_multi_registry import AuthorizationDenied, Registry
+from qyp_multi_registry import AuthorizationDenied, Registry, RegistryError
 from qyp_multi_transport import TransportStore
 
 
@@ -122,6 +122,96 @@ class FeishuIngressTests(unittest.TestCase):
         self.assertEqual(process_message(self.event("om_approve", "/approve task-demo"), self.routes, self.transport), "task-approved")
         self.assertEqual(process_message(self.event("om_approve", "/approve task-demo"), self.routes, self.transport), "task-approved")
         self.assertEqual(self.registry.task_queue("oc_team", "ou_owner")[0]["credited_user_id"], "builder")
+
+    def test_help_and_task_details_are_group_commands(self) -> None:
+        create = self.event("om_task", f"/task task-demo {SESSION} Ship feature | Tests pass")
+        process_message(create, self.routes, self.transport)
+        process_message(self.event("om_claim", "/claim task-demo"), self.routes, self.transport)
+        process_message(self.event("om_submit", "/submit task-demo commit:example"), self.routes, self.transport)
+        with mock.patch("feishu_group_ingress.send_reply", return_value="om_reply") as send:
+            self.assertEqual(process_message(self.event("om_help", "/help"), self.routes, self.transport, object()), "team-help")
+            self.assertIn("/task <任务ID>", send.call_args.args[2])
+            self.assertEqual(process_message(self.event("om_detail", "/task task-demo"), self.routes, self.transport, object()), "task-detail")
+            self.assertIn("Tests pass", send.call_args.args[2])
+            self.assertIn("commit:example", send.call_args.args[2])
+            self.assertIn("unverified", send.call_args.args[2])
+        self.assertEqual(self.transport.poll(self.pair["token"]), [])
+
+    def test_malformed_management_commands_do_not_reach_codex(self) -> None:
+        for text in ("/task", "/task task-demo missing criteria", "/claim", "/submit task-demo", "/history", "/session"):
+            with self.subTest(text=text), self.assertRaises(RegistryError):
+                process_message(self.event("om_bad", text), self.routes, self.transport)
+        self.assertEqual(self.transport.poll(self.pair["token"]), [])
+
+    def test_read_only_task_share_blocks_verification_and_approval(self) -> None:
+        process_message(self.event("om_task", f"/task task-demo {SESSION} Ship | Tests pass"), self.routes, self.transport)
+        process_message(self.event("om_claim", "/claim task-demo"), self.routes, self.transport)
+        process_message(self.event("om_submit", "/submit task-demo commit:example"), self.routes, self.transport)
+        evidence = self.registry.list_evidence("task-demo")[0]
+        self.registry.share_task("team", "task-demo", access="read")
+        for text in (f"/verify task-demo {evidence['evidence_id']}", "/approve task-demo"):
+            with self.subTest(text=text), self.assertRaises(AuthorizationDenied):
+                process_message(self.event("om_denied", text), self.routes, self.transport)
+        self.assertEqual(self.registry.list_evidence("task-demo")[0]["verification_status"], "unverified")
+
+    def test_session_revocation_blocks_results_before_and_after_completion(self) -> None:
+        for revoke_before_completion in (True, False):
+            with self.subTest(revoke_before_completion=revoke_before_completion):
+                self.registry.share_session("team", SESSION)
+                source = "om_before" if revoke_before_completion else "om_after"
+                process_message(self.event(source), self.routes, self.transport)
+                command = self.transport.poll(self.pair["token"])[0]
+                if revoke_before_completion:
+                    self.registry.unshare_session("team", SESSION)
+                completed = self.transport.complete(
+                    self.pair["token"], command["command_id"], status="completed", result={"answer": "private result"},
+                )
+                if revoke_before_completion:
+                    self.assertEqual(completed["status"], "failed")
+                    self.assertEqual(self.transport.next_event()["payload"]["result"], {})
+                    with self.transport._connect() as db:
+                        row = db.execute("SELECT result_json FROM agent_commands WHERE command_id=?", (command["command_id"],)).fetchone()
+                    self.assertEqual(row["result_json"], "{}")
+                else:
+                    self.registry.unshare_session("team", SESSION)
+                with mock.patch("feishu_group_ingress.send_reply", return_value="om_reply_" + source) as send:
+                    self.assertTrue(publish_one(None, self.routes, self.transport))
+                self.assertNotIn("private result", send.call_args.args[2])
+                self.assertIn("授权已撤销", send.call_args.args[2])
+                with self.transport._connect() as db:
+                    delivery = db.execute("SELECT status FROM agent_events WHERE command_id=?", (command["command_id"],)).fetchone()
+                self.assertEqual(delivery["status"], "sent")
+
+    def test_task_revocation_blocks_delivery_even_when_session_remains_shared(self) -> None:
+        self.registry.create_group_task(
+            "team", "ou_owner", SESSION, "Private task", {"objective": "Work", "acceptance": ["Done"]}, task_id="task-private",
+        )
+        self.transport.enqueue(
+            message_id="om_task_command", open_id="ou_owner", chat_id="oc_team",
+            session_id=SESSION, text="Work", task_id="task-private",
+        )
+        command = self.transport.poll(self.pair["token"])[0]
+        self.transport.complete(self.pair["token"], command["command_id"], status="completed", result={"answer": "private task result"})
+        self.registry.unshare_task("team", "task-private")
+        with mock.patch("feishu_group_ingress.send_reply", return_value="om_reply") as send:
+            self.assertTrue(publish_one(None, self.routes, self.transport))
+        self.assertNotIn("private task result", send.call_args.args[2])
+        self.assertIn("授权已撤销", send.call_args.args[2])
+
+    def test_release_receipt_survives_send_failure_and_another_members_claim(self) -> None:
+        self.registry.add_user("ou_builder", "Builder", user_id="builder", status="approved")
+        self.registry.add_group_member("team", "ou_builder")
+        process_message(self.event("om_task", f"/task task-demo {SESSION} Ship | Tests pass"), self.routes, self.transport)
+        process_message(self.event("om_claim", "/claim task-demo", open_id="ou_builder"), self.routes, self.transport)
+        release = self.event("om_release", "/release task-demo")
+        with mock.patch("feishu_group_ingress.send_reply", side_effect=OSError("offline")):
+            with self.assertRaises(OSError):
+                process_message(release, self.routes, self.transport, object())
+        process_message(self.event("om_reclaim", "/claim task-demo", open_id="ou_builder"), self.routes, self.transport)
+        with mock.patch("feishu_group_ingress.send_reply", return_value="om_reply") as send:
+            self.assertEqual(process_message(release, RouteStore(self.routes.path), self.transport, object()), "task-released")
+            self.assertIn("已回到待领取队列", send.call_args.args[2])
+        self.assertEqual(self.registry.current_shared_task_claim("oc_team", "ou_builder", "task-demo")["status"], "active")
 
     def test_history_search_is_queued_only_with_consent_and_revocation_scrubs_result(self) -> None:
         self.registry.add_user("ou_builder", "Builder", user_id="builder", status="approved")
